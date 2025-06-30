@@ -61,6 +61,9 @@ def evaluate_perplexity(model, tokenizer, dataset_name: str = "wikitext2", seq_l
     print(f"\nPerplexity on {dataset_name}: {ppl.item():.4f}")
 
 
+
+# Other method for perplexity calculation
+
 # import torch
 # from tqdm import tqdm
 # from data.data_loader import get_wikitext2_test_data
