@@ -16,7 +16,6 @@ def main():
         default="meta-llama/Llama-2-7b-hf",
         help="Path to the Hugging Face model or model identifier."
     )
-    
     # --- Functionality Arguments ---
     func_group = parser.add_argument_group('Functionalities')
     func_group.add_argument(
@@ -40,6 +39,16 @@ def main():
         help="Analyzes and plots activation magnitudes."
     )
     func_group.add_argument(
+        "--eval_act_kurtosis",
+        action="store_true",
+        help="Analyzes and plots the kurtosis of activation distributions."
+    )
+    func_group.add_argument(
+        "--eval_per_token_kurtosis",
+        action="store_true",
+        help="Finds top tokens with the highest kurtosis by module and by layer."
+    )
+    func_group.add_argument(
         "--plot_results",
         action="store_true",
         help="If set, generates and saves plots for the analysis results."
@@ -55,7 +64,14 @@ def main():
         choices=["per-tensor", "per-token"],
         help="Granularity for activation quantization (used for --eval_quant_error)."
     )
-    quant_group.add_argument("--quant_calib_samples", type=int, default=128, help="Number of C4 samples to use for calibration.")
+    quant_group.add_argument(
+        "--calib_dataset", 
+        type=str, 
+        default="c4", 
+        choices=["c4", "wikitext2"],
+        help="Dataset to use for calibration."
+    )
+    quant_group.add_argument("--quant_calib_samples", type=int, default=512, help="Number of samples to use for calibration.")
 
     
     args = parser.parse_args()
@@ -76,21 +92,33 @@ def main():
 
     if args.eval_quant_error:
         analyzer.run_quantization_error_analysis(
-            bits=args.quant_bits,
-            granularity=args.quant_granularity,
-            num_samples=args.quant_calib_samples,
-            plot=args.plot_results
+            calib_dataset=args.calib_dataset,
+            bits=args.quant_bits, granularity=args.quant_granularity,
+            num_samples=args.quant_calib_samples, plot=args.plot_results
         )
 
     if args.eval_top_token_error:
         analyzer.run_per_token_error_analysis(
-            bits=args.quant_bits,
-            granularity=args.quant_granularity,
-            num_samples=args.quant_calib_samples,
-            plot=args.plot_results
+            calib_dataset=args.calib_dataset,
+            bits=args.quant_bits, granularity=args.quant_granularity,
+            num_samples=args.quant_calib_samples, plot=args.plot_results
         )
+
     if args.eval_act_magnitude:
         analyzer.run_activation_magnitude_analysis(
+            calib_dataset=args.calib_dataset,
+            num_samples=args.quant_calib_samples, plot=args.plot_results
+        )
+    
+    if args.eval_act_kurtosis:
+        analyzer.run_activation_kurtosis_analysis(
+            calib_dataset=args.calib_dataset,
+            num_samples=args.quant_calib_samples, plot=args.plot_results
+        )
+    
+    if args.eval_per_token_kurtosis:
+        analyzer.run_per_token_kurtosis_analysis(
+            calib_dataset=args.calib_dataset,
             num_samples=args.quant_calib_samples, plot=args.plot_results
         )
 

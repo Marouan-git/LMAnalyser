@@ -213,7 +213,8 @@ def plot_top_token_magnitudes_by_module(module_top_tokens, model_name):
     nrows = math.ceil(num_modules / ncols)
     
     fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
-    fig.suptitle(f'Top Tokens by Average Max Activation Magnitude ({model_name})', fontsize=20, y=0.96)
+    #fig.suptitle(f'Top Tokens by Average Max Activation Magnitude ({model_name})', fontsize=20, y=0.96)
+    fig.suptitle(f'Top Tokens by Max Activation Magnitude ({model_name})', fontsize=20, y=0.96)
     
     colors = plt.get_cmap('plasma')(np.linspace(0, 1, num_modules))
     sorted_module_names = sorted(module_top_tokens.keys())
@@ -229,7 +230,8 @@ def plot_top_token_magnitudes_by_module(module_top_tokens, model_name):
         y_labels = [f"{text} (n={count})" for text, count in zip(token_texts, counts)]
 
         ax.barh(y_labels, mags, color=colors[i], alpha=0.8)
-        ax.set_xlabel('Average Max Magnitude')
+        #ax.set_xlabel('Average Max Magnitude')
+        ax.set_xlabel('Max Magnitude')
         ax.set_title(f'Module: {module_name}')
         ax.grid(axis='x', linestyle='--', alpha=0.6)
 
@@ -288,4 +290,91 @@ def plot_module_magnitudes_per_layer(module_mags_data, model_name):
     filename = f"module_magnitudes_per_layer_{model_name.replace('/', '_')}.png"
     plt.savefig(filename)
     print(f"Saved per-layer module magnitude plot to {filename}")
+    plt.close()
+
+def plot_activation_kurtosis(kurtosis_data, model_name):
+    """
+    Plots the average activation kurtosis for each layer and module type.
+
+    Args:
+        kurtosis_data (dict): A dict containing 'per_layer' and 'per_module' kurtosis results.
+        model_name (str): The name of the model for plot titles.
+    """
+    per_layer_kurtosis = kurtosis_data.get('per_layer', {})
+    per_module_kurtosis = kurtosis_data.get('per_module', {})
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14))
+    fig.suptitle(f'Activation Kurtosis Analysis ({model_name})', fontsize=20, y=0.97)
+
+    # Plot 1: Per-Layer Kurtosis
+    if per_layer_kurtosis:
+        layers = sorted(per_layer_kurtosis.keys())
+        kurtosis_values = [per_layer_kurtosis[l] for l in layers]
+        ax1.plot(layers, kurtosis_values, marker='o', linestyle='-', color='royalblue')
+        ax1.set_title('Layer-wise Average Activation Kurtosis')
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Average Kurtosis (Fisher)')
+        ax1.set_xticks(layers)
+        ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    # Plot 2: Per-Module Kurtosis
+    if per_module_kurtosis:
+        sorted_modules = sorted(per_module_kurtosis.keys())
+        kurtosis_values = [per_module_kurtosis[m] for m in sorted_modules]
+        colors = plt.get_cmap('viridis')(np.linspace(0, 1, len(sorted_modules)))
+        ax2.bar(sorted_modules, kurtosis_values, color=colors)
+        ax2.set_title('Module-wise Average Activation Kurtosis')
+        ax2.set_xlabel('Module Type')
+        ax2.set_ylabel('Average Kurtosis (Fisher)')
+        ax2.tick_params(axis='x', rotation=45)
+        ax2.grid(axis='y', linestyle='--', alpha=0.7)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    filename = f"activation_kurtosis_{model_name.replace('/', '_')}.png"
+    plt.savefig(filename)
+    print(f"Saved activation kurtosis plot to {filename}")
+    plt.close()
+
+def plot_top_token_kurtosis(data, title_prefix, filename_prefix, model_name):
+    """
+    A generic plotter for top token kurtosis by module or by layer.
+    """
+    if not data:
+        print(f"No data to plot for {title_prefix}.")
+        return
+
+    num_items = len(data)
+    ncols = 2
+    nrows = math.ceil(num_items / ncols)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
+    fig.suptitle(f'Top Tokens with Highest Activation Kurtosis ({model_name})', fontsize=20, y=0.96)
+    
+    colors = plt.get_cmap('cividis').colors
+    sorted_item_names = sorted(data.keys())
+
+    for i, item_name in enumerate(sorted_item_names):
+        ax = axes[i // ncols, i % ncols]
+        top_tokens = data[item_name]
+        top_tokens.reverse()
+
+        kurt_values = [item[0] for item in top_tokens]
+        counts = [item[1] for item in top_tokens]
+        token_texts = [repr(item[2]) for item in top_tokens]
+        y_labels = [f"{text} (n={count})" for text, count in zip(token_texts, counts)]
+        
+        ax.barh(y_labels, kurt_values, color=colors[i * (len(colors)//num_items) % len(colors)], alpha=0.8)
+        ax.set_xlabel('Average Kurtosis (Fisher)')
+        ax.set_title(f'{title_prefix}: {item_name}')
+        ax.grid(axis='x', linestyle='--', alpha=0.6)
+
+    for i in range(num_items, nrows * ncols):
+        fig.delaxes(axes.flatten()[i])
+
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    
+    filename = f"{filename_prefix}_{model_name.replace('/', '_')}.png"
+    plt.savefig(filename)
+    print(f"Saved {title_prefix} kurtosis plot to {filename}")
     plt.close()
