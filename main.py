@@ -71,7 +71,7 @@ def main():
         choices=["c4", "wikitext2"],
         help="Dataset to use for calibration."
     )
-    quant_group.add_argument("--quant_calib_samples", type=int, default=512, help="Number of samples to use for calibration.")
+    quant_group.add_argument("--calib_samples", type=int, default=512, help="Number of samples to use for calibration.")
 
     
     args = parser.parse_args()
@@ -94,32 +94,32 @@ def main():
         analyzer.run_quantization_error_analysis(
             calib_dataset=args.calib_dataset,
             bits=args.quant_bits, granularity=args.quant_granularity,
-            num_samples=args.quant_calib_samples, plot=args.plot_results
+            num_samples=args.calib_samples, plot=args.plot_results
         )
 
     if args.eval_top_token_error:
         analyzer.run_per_token_error_analysis(
             calib_dataset=args.calib_dataset,
             bits=args.quant_bits, granularity=args.quant_granularity,
-            num_samples=args.quant_calib_samples, plot=args.plot_results
+            num_samples=args.calib_samples, plot=args.plot_results
         )
 
     if args.eval_act_magnitude:
         analyzer.run_activation_magnitude_analysis(
             calib_dataset=args.calib_dataset,
-            num_samples=args.quant_calib_samples, plot=args.plot_results
+            num_samples=args.calib_samples, plot=args.plot_results
         )
     
     if args.eval_act_kurtosis:
         analyzer.run_activation_kurtosis_analysis(
             calib_dataset=args.calib_dataset,
-            num_samples=args.quant_calib_samples, plot=args.plot_results
+            num_samples=args.calib_samples, plot=args.plot_results
         )
     
     if args.eval_per_token_kurtosis:
         analyzer.run_per_token_kurtosis_analysis(
             calib_dataset=args.calib_dataset,
-            num_samples=args.quant_calib_samples, plot=args.plot_results
+            num_samples=args.calib_samples, plot=args.plot_results
         )
 
         
