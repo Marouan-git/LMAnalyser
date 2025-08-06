@@ -45,7 +45,7 @@ def load_model_and_tokenizer(model_path: str, use_auth_token: bool = True):
         
     except Exception as e:
         print(f"Error loading model: {e}")
-        print("\nNOTE: To access Llama 2 models, you must:")
+        print("\nNOTE: To access Llama models, you must:")
         print("1. Visit https://ai.meta.com/resources/models-and-libraries/llama-downloads/ and accept the license.")
         print("2. Be granted access by Meta (this can take a few days).")
         print("3. Log in to your Hugging Face account using `huggingface-cli login` in your terminal.")

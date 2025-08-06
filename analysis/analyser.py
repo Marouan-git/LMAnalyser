@@ -1,25 +1,42 @@
 import torch
 import numpy as np
 from tqdm import tqdm
+import json
 from collections import defaultdict
 from scipy.stats import kurtosis
+from scipy.special import logsumexp
 from data.data_loader import get_calibration_data
 from analysis.quantization import fake_quantize_activation, calculate_quantization_error
-from plotting.plotter import plot_layer_errors, plot_module_errors, plot_top_token_errors_by_module, plot_layer_magnitudes, plot_module_magnitudes, plot_top_token_magnitudes_by_module, plot_module_magnitudes_per_layer, plot_activation_kurtosis, plot_top_token_kurtosis
+from plotting.plotter import plot_layer_errors, plot_module_errors, plot_top_token_errors_by_module, plot_layer_magnitudes, plot_module_magnitudes, plot_top_token_magnitudes_by_module, plot_module_magnitudes_per_layer, plot_activation_kurtosis, plot_top_token_kurtosis, plot_down_proj_spikes, plot_token_occurrence_magnitudes, plot_prompt_spikes, plot_bops_analysis, plot_fisher_information, plot_max_median_ratio, plot_fgmp_sensitivity
+
+from hadamard_utils import apply_structured_hadamard
 
 class LLMAnalyser:
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, use_hadamard_transform=False):
         self.model = model
         self.tokenizer = tokenizer
         self.device = model.device
         self.captured_activations = defaultdict(list)
         self.hooks = []
+        self.use_hadamard_transform = use_hadamard_transform
+        self.is_fisher_analysis = False
+        if self.use_hadamard_transform:
+            print("Hadamard transform is ENABLED for all activation analyses.")
 
     def _get_hook(self, name):
         def hook(model, input, output):
-            # We are interested in the input to the linear layers, which are activations.
-            # input is a tuple, we take the first element.
-            self.captured_activations[name].append(input[0].detach())
+            activation_tensor = input[0]
+            # Conditionally apply Hadamard transform
+            if self.use_hadamard_transform:
+                # The transform works on the last dimension (features/channels)
+                activation_tensor = apply_structured_hadamard(activation_tensor)
+            # For Fisher Info, we need to retain the grad of the intermediate tensor
+            if self.is_fisher_analysis:
+                activation_tensor.retain_grad()
+                self.captured_activations[name].append(activation_tensor)
+            else:
+                # For all other analyses, detach to save memory
+                self.captured_activations[name].append(activation_tensor.detach())
         return hook
 
     def _register_hooks(self, module_names=None):
@@ -49,9 +66,41 @@ class LLMAnalyser:
             hook.remove()
         self.hooks = []
         self.captured_activations.clear()
+
+    def _get_excluded_token_ids(self, exclude_tokens):
+        """Helper to convert a list of token strings to a set of token IDs."""
+        if not exclude_tokens:
+            return set()
+            
+        print(f"Excluding tokens from analysis: {exclude_tokens}")
+        excluded_token_ids = set()
+        for token_str in exclude_tokens:
+            processed_str = bytes(token_str, "utf-8").decode("unicode_escape")
+            # This more robust method handles various tokenization cases
+            ids = self.tokenizer.encode(processed_str, add_special_tokens=False)
+            if len(ids) == 1: excluded_token_ids.add(ids[0])
+            elif len(ids) == 2:
+                excluded_token_ids.add(ids[0])
+                excluded_token_ids.add(ids[1])
+            else:
+                print(f"Warning: Token '{processed_str}' is tokenized into multiple IDs and will be ignored.")
+            # Also handle the case with a leading space, which often has a different ID
+            ids_with_space = self.tokenizer.encode("a" + processed_str, add_special_tokens=False)
+            if len(ids_with_space) > 1: excluded_token_ids.add(ids_with_space[-1])
+        print(f"Excluded token IDs: {excluded_token_ids}")
+        return excluded_token_ids
+    
+    def _save_to_json(self, data, filename):
+        """Helper to save dictionary data to a JSON file."""
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=4)
+            print(f"Saved results to {filename}")
+        except Exception as e:
+            print(f"Error saving data to {filename}: {e}")
     
     @torch.no_grad()
-    def run_activation_magnitude_analysis(self, calib_dataset, num_samples: int = 16, plot: bool = False):
+    def run_activation_magnitude_analysis(self, calib_dataset, num_samples: int = 16, plot: bool = False, exclude_tokens: list = None):
         """
         Performs a unified analysis of activation magnitudes:
         1. Per-Layer: Average max magnitude for each layer.
@@ -60,6 +109,11 @@ class LLMAnalyser:
         4. Per-Token: Top tokens with the highest average max magnitude for key module types.
         """
         print("\nStarting unified activation magnitude analysis...")
+
+        if exclude_tokens:
+            print(f"Excluding tokens from analysis: {exclude_tokens}")
+     
+        excluded_token_ids = self._get_excluded_token_ids(exclude_tokens)
         # Hook all linear layers to gather data for all analyses
         self._register_hooks()
         
@@ -82,8 +136,16 @@ class LLMAnalyser:
 
             for name, activations in self.captured_activations.items():
                 act_abs = activations[0].abs() # Shape: [1, seq_len, features]
-                max_mag = act_abs.max().item()
+                # Create a mask to filter out excluded tokens
+                mask = torch.tensor([tid.item() not in excluded_token_ids for tid in input_ids_cpu], device=act_abs.device)
                 
+
+                filtered_act_abs = act_abs.squeeze(0)[mask]
+                if filtered_act_abs.numel() == 0: continue # Skip if all tokens were excluded
+
+                # max_mag = act_abs.max().item()
+                max_mag = filtered_act_abs.max().item()
+
                 try:
                     layer_index = int(name.split('.')[2])
                     module_type = ".".join(name.split('.')[3:])
@@ -97,7 +159,8 @@ class LLMAnalyser:
                 if module_suffix:
                     token_max_mag_per_pos = act_abs.max(dim=-1).values.view(-1)
                     for token_idx, mag in enumerate(token_max_mag_per_pos.tolist()):
-                        token_mags_by_module[module_suffix][input_ids_cpu[token_idx].item()].append(mag)
+                        if input_ids_cpu[token_idx].item() not in excluded_token_ids:
+                            token_mags_by_module[module_suffix][input_ids_cpu[token_idx].item()].append(mag)
 
             self.captured_activations.clear()
         
@@ -113,7 +176,7 @@ class LLMAnalyser:
         for layer, avg_mag in sorted(avg_layer_mags.items()):
             print(f"  Layer {layer}: {avg_mag:.4f}")
         if plot:
-            plot_layer_magnitudes(avg_layer_mags, model_name)
+            plot_layer_magnitudes(avg_layer_mags, model_name, self.use_hadamard_transform, exclude_tokens)
 
         # 2. Per-Module (Total) Analysis
         avg_module_mags = {mtype: np.mean(mags) for mtype, mags in module_mags.items()}
@@ -121,7 +184,7 @@ class LLMAnalyser:
         for mtype, avg_mag in sorted(avg_module_mags.items()):
             print(f"  Module Type: {mtype:<20} | Avg. Max Magnitude: {avg_mag:.4f}")
         if plot:
-            plot_module_magnitudes(avg_module_mags, model_name)
+            plot_module_magnitudes(avg_module_mags, model_name, self.use_hadamard_transform, exclude_tokens)
         
         # 3. Per-Module (Per-Layer) Analysis
         avg_module_mags_per_layer = defaultdict(dict)
@@ -129,7 +192,7 @@ class LLMAnalyser:
             for lidx, mags in ldata.items():
                 avg_module_mags_per_layer[mtype][lidx] = np.mean(mags)
         if plot:
-            plot_module_magnitudes_per_layer(avg_module_mags_per_layer, model_name)
+            plot_module_magnitudes_per_layer(avg_module_mags_per_layer, model_name, self.use_hadamard_transform, exclude_tokens)
 
         # 4. Per-Token Analysis
         module_top_tokens = {}
@@ -145,10 +208,10 @@ class LLMAnalyser:
             for avg_mag, count, token_text in module_top_tokens[module_suffix]:
                 print(f"    Token: {repr(token_text):<15} (n={count}) | Avg. Max Magnitude: {avg_mag:.4f}")
         if plot:
-            plot_top_token_magnitudes_by_module(module_top_tokens, model_name)
+            plot_top_token_magnitudes_by_module(module_top_tokens, model_name, self.use_hadamard_transform, exclude_tokens)
 
     @torch.no_grad()
-    def run_quantization_error_analysis(self, calib_dataset, bits: int, granularity: str, num_samples: int = 16, plot: bool = False):
+    def run_quantization_error_analysis(self, calib_dataset, bits: int, granularity: str, num_samples: int = 16, plot: bool = False, exclude_tokens: list = None):
         """
         Runs a forward pass on calibration data to capture activations,
         then calculates and prints the quantization error for all linear layers.
@@ -160,6 +223,8 @@ class LLMAnalyser:
         if calib_data is None:
             self._remove_hooks()
             return
+        
+        excluded_token_ids = self._get_excluded_token_ids(exclude_tokens)
             
         print("\nCalculating activation quantization error...")
         # Structure: {module_name: [error_sample_1, error_sample_2, ...]}
@@ -168,12 +233,21 @@ class LLMAnalyser:
         for i in tqdm(range(num_samples)):
             input_ids = calib_data[i]["input_ids"].to(self.device)
             self.model(input_ids)
+
+            input_ids_cpu = calib_data[i]["input_ids"].view(-1)
+            mask = torch.tensor([tid.item() not in excluded_token_ids for tid in input_ids_cpu], device=self.device)
             
             for name, activations in self.captured_activations.items():
                 activation_tensor = activations[0] # We process one sample at a time
                 quantized_tensor = fake_quantize_activation(activation_tensor, bits, granularity)
-                error = calculate_quantization_error(activation_tensor, quantized_tensor)
-                module_errors_list[name].append(error)
+
+                # Filter both tensors before calculating error
+                filtered_act = activation_tensor[:, mask, :]
+                filtered_quant = quantized_tensor[:, mask, :]
+
+                if filtered_act.numel() > 0:
+                    error = calculate_quantization_error(filtered_act, filtered_quant)
+                    module_errors_list[name].append(error)
             
             self.captured_activations.clear() # Free memory after each sample
 
@@ -181,10 +255,10 @@ class LLMAnalyser:
         module_errors_avg = {name: np.mean(errors) for name, errors in module_errors_list.items()}
         
         self._remove_hooks()
-        self._report_module_and_layer_errors(module_errors_avg, plot, bits, granularity)
+        self._report_module_and_layer_errors(module_errors_avg, plot, bits, granularity, exclude_tokens)
 
     @torch.no_grad()
-    def run_per_token_error_analysis(self, calib_dataset, bits: int, granularity: str, plot: bool = False, num_samples: int = 16):
+    def run_per_token_error_analysis(self, calib_dataset, bits: int, granularity: str, plot: bool = False, num_samples: int = 16, exclude_tokens: list = None):
         """
         Analyzes per-token quantization error for major module types across all layers
         to find the unique tokens that are most sensitive to quantization on average.
@@ -204,6 +278,8 @@ class LLMAnalyser:
         if calib_data is None:
             self._remove_hooks()
             return
+        
+        excluded_token_ids = self._get_excluded_token_ids(exclude_tokens)
 
         print(f"\nAnalyzing per-token error with {granularity} quantization...")
         
@@ -229,11 +305,15 @@ class LLMAnalyser:
                 per_token_mse = (activation_tensor - quantized_tensor).pow(2).mean(dim=-1).view(-1)
                 
                 # Aggregate errors for this module type
-                for token_idx in range(per_token_mse.size(0)):
+                # for token_idx in range(per_token_mse.size(0)):
+                #     token_id = input_ids_cpu[token_idx].item()
+                #     error = per_token_mse[token_idx].item()
+                #     module_token_errors[module_suffix][token_id].append(error)
+                for token_idx, error in enumerate(per_token_mse.tolist()):
                     token_id = input_ids_cpu[token_idx].item()
-                    error = per_token_mse[token_idx].item()
-                    module_token_errors[module_suffix][token_id].append(error)
-            
+                    if token_id not in excluded_token_ids:
+                        module_token_errors[module_suffix][token_id].append(error)
+
             self.captured_activations.clear() # CRITICAL: Free memory after processing each sample
 
         torch.cuda.empty_cache()
@@ -269,7 +349,7 @@ class LLMAnalyser:
         if plot:
             print("\nGenerating plots...")
             model_name = self.model.config._name_or_path
-            plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granularity)
+            plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granularity, self.use_hadamard_transform, exclude_tokens)
 
     @torch.no_grad()
     def run_activation_kurtosis_analysis(self, calib_dataset, num_samples: int = 16, plot: bool = False):
@@ -325,7 +405,7 @@ class LLMAnalyser:
                 "per_layer": avg_layer_kurtosis,
                 "per_module": avg_module_kurtosis
             }
-            plot_activation_kurtosis(kurtosis_data, self.model.config._name_or_path)
+            plot_activation_kurtosis(kurtosis_data, self.model.config._name_or_path, self.use_hadamard_transform)
 
     @torch.no_grad()
     def run_per_token_kurtosis_analysis(self, calib_dataset, num_samples: int = 16, plot: bool = False, layers_to_plot: list = [0, 15, 31]):
@@ -402,11 +482,182 @@ class LLMAnalyser:
         if plot:
             model_name = self.model.config._name_or_path
             if module_top_tokens:
-                plot_top_token_kurtosis(module_top_tokens, "Module", "top_token_kurtosis_by_module", model_name)
+                plot_top_token_kurtosis(module_top_tokens, "Module", "top_token_kurtosis_by_module", model_name, self.use_hadamard_transform)
             if layer_top_tokens:
-                plot_top_token_kurtosis(layer_top_tokens, "Layer", "top_token_kurtosis_by_layer", model_name)
+                plot_top_token_kurtosis(layer_top_tokens, "Layer", "top_token_kurtosis_by_layer", model_name, self.use_hadamard_transform)
 
-    def _report_module_and_layer_errors(self, module_errors, plot, bits, granularity):
+    @torch.no_grad()
+    def run_down_proj_spike_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False):
+        """
+        Analyzes the top 3 tokens with the highest activation magnitude
+        for each down_proj module in every layer.
+        """
+        print("\nAnalyzing top token activation spikes in down_proj modules...")
+        self._register_hooks(module_names=['mlp.down_proj'])
+        
+        calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+        if calib_data is None: self._remove_hooks(); return
+
+        # Structure: {layer_index: {token_id: [max_mag1, max_mag2, ...]}}
+        layer_data = defaultdict(lambda: defaultdict(list))
+
+        for i in tqdm(range(len(calib_data)), desc="Processing samples for down_proj spikes"):
+            self.model(calib_data[i]["input_ids"].to(self.device))
+            input_ids_cpu = calib_data[i]["input_ids"].view(-1)
+
+            for name, activations in self.captured_activations.items():
+                if not name.endswith('mlp.down_proj'): continue
+                
+                act_abs = activations[0].abs()
+                token_max_mag = act_abs.max(dim=-1).values.view(-1)
+                
+                try:
+                    layer_index = int(name.split('.')[2])
+                    for token_idx, mag in enumerate(token_max_mag.tolist()):
+                        token_id = input_ids_cpu[token_idx].item()
+                        layer_data[layer_index][token_id].append(mag)
+                except (ValueError, IndexError):
+                    continue
+            
+            self.captured_activations.clear()
+
+        torch.cuda.empty_cache()
+        self._remove_hooks()
+
+        # --- Process and Report ---
+        plot_data = {}
+        print("\n--- Top 5 Tokens with Highest Avg. Max Magnitude in down_proj Modules ---")
+        for layer_idx, token_mags_dict in sorted(layer_data.items()):
+            avg_token_mags = []
+            for token_id, mags in token_mags_dict.items():
+                avg_token_mags.append((np.mean(mags), self.tokenizer.decode(token_id)))
+            
+            avg_token_mags.sort(key=lambda x: x[0], reverse=True)
+            plot_data[layer_idx] = avg_token_mags[:5]
+            
+            print(f"\n  --- Layer {layer_idx} ---")
+            for avg_mag, token_text in plot_data[layer_idx]:
+                print(f"    Token: {repr(token_text):<15} | Avg. Max Magnitude: {avg_mag:.4f}")
+
+        if plot:
+            plot_down_proj_spikes(plot_data, self.model.config._name_or_path, self.use_hadamard_transform)
+    
+    @torch.no_grad()
+    def run_token_occurrence_analysis(self, calib_dataset: str, target_token_str: str, num_samples: int = 128, plot: bool = False):
+        """
+        Analyzes how the activation magnitude of a specific token changes based on its
+        occurrence number within a sequence.
+        """
+        print(f"\nAnalyzing activation magnitude vs. occurrence for token: {repr(target_token_str)}")
+        target_module_suffixes = ['self_attn.q_proj', 'self_attn.o_proj', 'mlp.gate_proj', 'mlp.down_proj']
+        self._register_hooks(module_names=target_module_suffixes)
+        
+        calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+        if calib_data is None: self._remove_hooks(); return
+
+        try:
+            target_token_id = self.tokenizer.encode(target_token_str, add_special_tokens=False)[0]
+        except Exception as e:
+            print(f"Could not encode target token '{target_token_str}'. Error: {e}")
+            self._remove_hooks()
+            return
+            
+        print(f"Target token '{target_token_str}' has ID: {target_token_id}")
+
+        # Structure: {module_suffix: {occurrence_num: [mag1, mag2, ...]}}
+        results = defaultdict(lambda: defaultdict(list))
+
+        for i in tqdm(range(len(calib_data)), desc=f"Processing samples for token '{target_token_str}'"):
+            input_ids_gpu = calib_data[i]["input_ids"].to(self.device)
+            self.model(input_ids_gpu)
+            input_ids_cpu = calib_data[i]["input_ids"].view(-1)
+            
+            # Find indices of the target token in this sample
+            occurrence_indices = (input_ids_cpu == target_token_id).nonzero(as_tuple=True)[0]
+
+            print(f"Sample {i+1}/{num_samples}: Found {len(occurrence_indices)} occurrences of target token '{target_token_str}'")
+            
+            if occurrence_indices.numel() > 0:
+                for name, activations in self.captured_activations.items():
+                    act_abs = activations[0].abs() # Shape: [1, seq_len, features]
+                    module_suffix = next((s for s in target_module_suffixes if name.endswith(s)), None)
+                    if not module_suffix: continue
+
+                    # Get max magnitude for each token position
+                    token_max_mag = act_abs.max(dim=-1).values.view(-1)
+                    
+                    # For each occurrence, record its magnitude
+                    for i, token_pos in enumerate(occurrence_indices):
+                        occurrence_num = i + 1 # 1-indexed
+                        magnitude = token_max_mag[token_pos].item()
+                        results[module_suffix][occurrence_num].append(magnitude)
+
+            self.captured_activations.clear()
+
+        torch.cuda.empty_cache()
+        self._remove_hooks()
+
+        # --- Process and Report ---
+        plot_data = defaultdict(dict)
+        print("\n--- Activation Magnitude vs. Token Occurrence ---")
+        for module_suffix, data in sorted(results.items()):
+            print(f"\n  --- Module: {module_suffix} ---")
+            for occ_num, mags in sorted(data.items()):
+                avg_mag = np.mean(mags)
+                count = len(mags)
+                plot_data[module_suffix][occ_num] = {'avg_mag': avg_mag, 'count': count}
+                print(f"    Occurrence #{occ_num}: Avg. Max Magnitude = {avg_mag:.4f} (from {count} instances)")
+
+        if plot:
+            plot_token_occurrence_magnitudes(plot_data, target_token_str, self.model.config._name_or_path, self.use_hadamard_transform)
+
+    @torch.no_grad()
+    def run_prompt_spike_analysis(self, prompt_text: str, plot: bool = False, layers_to_plot: list = None):
+        """
+        Analyzes and plots the activation magnitudes for each token in a user-provided prompt.
+        """
+        print(f"\nAnalyzing activation magnitudes for prompt: \"{prompt_text}\"")
+        target_module_suffixes = ['self_attn.q_proj', 'self_attn.o_proj', 'mlp.gate_proj', 'mlp.down_proj']
+        self._register_hooks(module_names=target_module_suffixes)
+
+        # Tokenize the user's prompt
+        input_ids = self.tokenizer.encode(prompt_text, return_tensors="pt").to(self.device)
+        token_labels = [self.tokenizer.decode(token_id) for token_id in input_ids[0]]
+        
+        # Run a single forward pass
+        self.model(input_ids)
+
+        # Structure: {module_suffix: {layer_idx: [mag_token_0, mag_token_1, ...]}}
+        prompt_analysis_data = defaultdict(dict)
+
+        for name, activations in self.captured_activations.items():
+            act_abs = activations[0].abs() # Shape: [1, seq_len, features]
+            token_max_mag = act_abs.max(dim=-1).values.view(-1).cpu().tolist()
+            
+            try:
+                layer_index = int(name.split('.')[2])
+                module_suffix = next((s for s in target_module_suffixes if name.endswith(s)), None)
+                if module_suffix:
+                    prompt_analysis_data[module_suffix][layer_index] = token_max_mag
+            except (ValueError, IndexError):
+                continue
+        
+        self._remove_hooks()
+
+        # Report the data
+        for module_name, layer_data in sorted(prompt_analysis_data.items()):
+            print(f"\n--- Magnitudes for Module Type: {module_name} ---")
+            for layer_idx, mags in sorted(layer_data.items()):
+                print(f"  Layer {layer_idx}:")
+                for i, mag in enumerate(mags):
+                    print(f"    Token '{repr(token_labels[i])}': {mag:.4f}")
+
+        if plot:
+            print("\nGenerating prompt spike plot...")
+            plot_prompt_spikes(prompt_analysis_data, token_labels, self.model.config._name_or_path, layers_to_plot, self.use_hadamard_transform)
+
+
+    def _report_module_and_layer_errors(self, module_errors, plot, bits, granularity, exclude_tokens=None):
         """Prints the module/layer/model quantization errors and generates plots if requested."""
         print("\n--- Activation Quantization Error Report (MSE) ---")
         
@@ -442,5 +693,312 @@ class LLMAnalyser:
         if plot:
             print("\nGenerating plots...")
             model_name = self.model.config._name_or_path
-            plot_layer_errors(layer_errors, model_name, bits, granularity)
-            plot_module_errors(module_errors, model_name, bits, granularity)
+            plot_layer_errors(layer_errors, model_name, bits, granularity, self.use_hadamard_transform, exclude_tokens)
+            plot_module_errors(module_errors, model_name, bits, granularity, self.use_hadamard_transform, exclude_tokens)
+    
+    @torch.no_grad()
+    def run_bops_analysis(self, bits: int, plot: bool = False):
+        """
+        Calculates the theoretical Bit-Operations (BOPs) for each layer
+        in the model, assuming a uniform weight and activation precision.
+        """
+        print(f"\nStarting BOPs analysis for {bits}-bit quantization...")
+        
+        # Structure: {layer_index: total_bops_for_that_layer}
+        bops_per_module = defaultdict(dict)
+        bops_per_layer = defaultdict(float)
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                try:
+                    layer_index = int(name.split('.')[2])
+                    module_type = ".".join(name.split('.')[3:])
+                except (ValueError, IndexError):
+                    # Handle modules outside of layers, like lm_head
+                    layer_index = 'head'
+                    module_type = 'lm_head'
+
+                # BOPs = In * Out * w_bits * a_bits (per token)
+                # We use the same bit-width for both for simplicity
+                bops = (module.in_features * module.out_features * bits * bits) / 1e9
+                
+                bops_per_module[layer_index][module_type] = bops
+                bops_per_layer[layer_index] += bops
+        
+        # --- Report Results ---
+        print("\n--- BOPs Analysis Results (Giga-BOPs per token) ---")
+        total_bops = sum(bops_per_layer.values())
+        for layer_idx in sorted(bops_per_layer.keys(), key=lambda x: (isinstance(x, str), x)):
+            print(f"  Layer {layer_idx}: Total G-BOPs = {bops_per_layer[layer_idx]:.4f}")
+        print(f"\nTotal Model G-BOPs (Linear Layers): {total_bops:.4f}")
+
+        # --- Save to JSON and Plot ---
+       
+        model_name_str = self.model.config._name_or_path.replace('/', '_')
+        self._save_to_json(bops_per_layer, f"bops_per_layer_{model_name_str}_{bits}bit.json")
+        self._save_to_json(bops_per_module, f"bops_per_module_{model_name_str}_{bits}bit.json")
+     
+
+        if plot:
+            print("Generating BOPs plot...")
+            plot_bops_analysis(bops_per_module, self.model.config._name_or_path, bits)
+
+    def run_fisher_information_analysis(self, calib_dataset: str, num_samples: int = 128, plot: bool = False):
+        """
+        Calculates the diagonal Fisher Information for activations.
+        This is approximated by the mean of the squared gradients of the loss w.r.t the activations.
+        """
+        print("\nStarting Activation Fisher Information analysis...")
+        self.is_fisher_analysis = True  # Enable gradient retention in hooks
+        self._register_hooks()
+        
+        calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+        if calib_data is None: self._remove_hooks(); return
+
+        # {module_name: [sum_of_sq_grads_sample1, ...]}
+        fisher_info_list = defaultdict(list)
+
+        for i in tqdm(range(len(calib_data)), desc="Processing samples for Fisher Info"):
+            self.model.zero_grad()
+            
+            # --- Forward pass with hooks to capture activations ---
+            input_ids = calib_data[i]["input_ids"].to(self.device)
+            # We need to compute the loss, so we provide labels
+            outputs = self.model(input_ids, labels=input_ids)
+    
+            loss = outputs.loss
+            
+            # --- Backward pass to compute gradients ---
+            # The gradients will be captured by the backward hooks registered below
+            loss.backward()
+
+            # --- Process captured gradients ---
+            for name, activations in self.captured_activations.items():
+                # The gradient is stored in the .grad attribute of the captured tensor
+                grad = activations[0].grad
+                #print(f"Processing gradients for module: {name} ; Gradient = {grad}")
+                if grad is not None:
+                    # Fisher Info = E[ (d(log p)/da)^2 ] ~= mean( (dL/da)^2 )
+                    fisher_val = torch.sum(grad**2).item()
+                    fisher_info_list[name].append(fisher_val)
+
+            self.captured_activations.clear()
+            self.model.zero_grad()
+            torch.cuda.empty_cache()
+
+        self.is_fisher_analysis = False # Disable gradient retention
+        self._remove_hooks()
+
+        # --- Aggregate and Report Results ---
+        # Average the Fisher Info across all samples
+        avg_fisher_info = {name: np.mean(vals) for name, vals in fisher_info_list.items()}
+
+        # Alternative using LogSumExp to approximate the max:
+        # This focuses on the worst-case sensitivity observed.
+        lse_fisher_info = {name: logsumexp(np.float64(vals)) for name, vals in fisher_info_list.items()}
+        
+        per_layer_fisher = defaultdict(float)
+        per_module_fisher = defaultdict(lambda: defaultdict(float))
+
+        per_layer_fisher_lse = defaultdict(float)
+        per_module_fisher_lse = defaultdict(lambda: defaultdict(float))
+
+        print("\n--- Activation Fisher Information (Average) Results ---")
+        for name, fisher_val in sorted(avg_fisher_info.items()):
+            print(f"  Module: {name:<50} Fisher Info: {fisher_val:.4f}")
+            try:
+                layer_index = int(name.split('.')[2])
+                module_type = ".".join(name.split('.')[3:])
+                per_layer_fisher[layer_index] += fisher_val
+                per_module_fisher[module_type][layer_index] = fisher_val
+            except (ValueError, IndexError): continue
+
+        print("\n--- Layer-wise Total Fisher Information (Average) ---")
+        for layer, val in sorted(per_layer_fisher.items()):
+            print(f"  Layer {layer}: {val:.4f}")
+
+        for name, fisher_val in sorted(lse_fisher_info.items()):
+            print(f"  Module: {name:<50} Fisher Info (LSE): {fisher_val:.4f}")
+            try:
+                layer_index = int(name.split('.')[2])
+                module_type = ".".join(name.split('.')[3:])
+                per_layer_fisher_lse[layer_index] += fisher_val
+                per_module_fisher_lse[module_type][layer_index] = fisher_val
+            except (ValueError, IndexError): continue
+        
+        print("\n--- Layer-wise Total Fisher Information (LSE) ---")
+        for layer, val in sorted(per_layer_fisher_lse.items()):
+            print(f"  Layer {layer}: {val:.4f}")
+
+        # Save results to JSON files
+        model_name_str = self.model.config._name_or_path.replace('/', '_')
+        self._save_to_json(per_layer_fisher, f"fisher_info_per_layer_{model_name_str}.json")
+        self._save_to_json(per_module_fisher, f"fisher_info_per_module_{model_name_str}.json")
+
+        self._save_to_json(per_layer_fisher_lse, f"fisher_info_lse_per_layer_{model_name_str}.json")
+        self._save_to_json(per_module_fisher_lse, f"fisher_info_lse_per_module_{model_name_str}.json")
+
+        if plot:
+            fisher_data = {
+                "per_layer": per_layer_fisher,
+                "per_module": per_module_fisher
+            }
+            plot_fisher_information(fisher_data, self.model.config._name_or_path, agg="average")
+
+            fisher_lse_data = {
+                "per_layer": per_layer_fisher_lse,
+                "per_module": per_module_fisher_lse
+            }
+            plot_fisher_information(fisher_lse_data, self.model.config._name_or_path, agg="lse")
+
+    @torch.no_grad()
+    def run_max_median_ratio_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False):
+        """
+        Calculates the max-to-median ratio of token-wise activation scales for each layer and module.
+        """
+        print("\nStarting Max-to-Median Ratio analysis...")
+        self._register_hooks()
+        
+        calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+        if calib_data is None: self._remove_hooks(); return
+
+        # {module_name: [all_token_scales_from_all_samples]}
+        module_scales = defaultdict(list)
+
+        for i in tqdm(range(len(calib_data)), desc="Processing samples for Max-Median Ratio"):
+            self.model(calib_data[i]["input_ids"].to(self.device))
+            
+            for name, activations in self.captured_activations.items():
+                act_abs = activations[0].abs()
+                # S(m) is the set of token-wise activation scales
+                # We define the scale of a token as its max absolute value along the feature dimension
+                token_scales = act_abs.max(dim=-1).values.view(-1)
+                module_scales[name].append(token_scales.cpu())
+
+            self.captured_activations.clear()
+
+        self._remove_hooks()
+
+        # --- Aggregate and Report Results ---
+        per_layer_ratio = {}
+        per_module_ratio = defaultdict(dict)
+
+        print("\n--- Max-to-Median Ratio Results ---")
+        for name, scales_list in sorted(module_scales.items()):
+            all_scales = torch.cat(scales_list).to(torch.float32).numpy()
+            if all_scales.size == 0: continue
+            
+            max_val = np.max(all_scales)
+            median_val = np.median(all_scales)
+            ratio = float(max_val / median_val) if median_val > 1e-6 else 0.0
+
+            print(f"  Module: {name:<50} Ratio: {ratio:.4f}")
+            try:
+                layer_index = int(name.split('.')[2])
+                module_type = ".".join(name.split('.')[3:])
+                per_module_ratio[module_type][layer_index] = ratio
+            except (ValueError, IndexError): continue
+        
+        # Calculate per-layer ratio by aggregating all scales within a layer
+        layer_scales = defaultdict(list)
+        for name, scales_list in module_scales.items():
+            try:
+                layer_index = int(name.split('.')[2])
+                layer_scales[layer_index].append(torch.cat(scales_list))
+            except (ValueError, IndexError): continue
+            
+        print("\n--- Layer-wise Max-to-Median Ratio ---")
+        for layer_idx, scales_list in sorted(layer_scales.items()):
+            all_layer_scales = torch.cat(scales_list).to(torch.float32).numpy()
+            if all_layer_scales.size == 0: continue
+            max_val = np.max(all_layer_scales)
+            median_val = np.median(all_layer_scales)
+            ratio = float(max_val / median_val) if median_val > 1e-6 else 0.0
+            per_layer_ratio[layer_idx] = ratio
+            print(f"  Layer {layer_idx}: {ratio:.4f}")
+        
+        # Save results to JSON files
+        model_name_str = self.model.config._name_or_path.replace('/', '_')
+        self._save_to_json(per_layer_ratio, f"max_median_ratio_per_layer_{model_name_str}.json")
+        self._save_to_json(per_module_ratio, f"max_median_ratio_per_module_{model_name_str}.json")
+
+        if plot:
+            ratio_data = {
+                "per_layer": per_layer_ratio,
+                "per_module": per_module_ratio
+            }
+            plot_max_median_ratio(ratio_data, self.model.config._name_or_path)
+    
+    def run_fgmp_sensitivity_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False, high_prec_bits: int = 8, low_prec_bits: int = 4):
+        """
+        Calculates the FGMP sensitivity metric (Impact Score) for activations.
+        Impact Score = E[ grad^2 * (Q_low(act) - Q_high(act))^2 ]
+        """
+        print(f"\nStarting FGMP sensitivity analysis (FP{high_prec_bits} vs FP{low_prec_bits})...")
+        self.is_fisher_analysis = True
+        self._register_hooks()
+        
+        calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+        if calib_data is None: self._remove_hooks(); return
+
+        sensitivity_scores = defaultdict(list)
+
+        for i in tqdm(range(len(calib_data)), desc="Processing samples for FGMP Sensitivity"):
+            self.model.zero_grad()
+            input_ids = calib_data[i]["input_ids"].to(self.device)
+            outputs = self.model(input_ids, labels=input_ids)
+            loss = outputs.loss
+            loss.backward()
+
+            for name, activations in self.captured_activations.items():
+                act = activations[0]
+                grad = act.grad
+                if grad is not None:
+                    # Calculate Fisher Info part
+                    fisher_info = grad**2
+                    
+                    # Calculate Change in Quantization Error part
+                    act_q_high = fake_quantize_activation(act, high_prec_bits, 'per-token')
+                    act_q_low = fake_quantize_activation(act, low_prec_bits, 'per-token')
+                    delta_q_error_sq = (act_q_low - act_q_high)**2
+                    
+                    # Calculate total impact score for this module instance
+                    impact_score = torch.sum(fisher_info * delta_q_error_sq).item()
+                    sensitivity_scores[name].append(impact_score)
+
+            self.captured_activations.clear()
+            self.model.zero_grad()
+            torch.cuda.empty_cache()
+
+        self.is_fisher_analysis = False
+        self._remove_hooks()
+
+        # --- Aggregate and Report Results ---
+        avg_sensitivity = {name: np.mean(vals) for name, vals in sensitivity_scores.items()}
+        per_layer_sensitivity = defaultdict(float)
+        per_module_sensitivity = defaultdict(lambda: defaultdict(float))
+
+        print("\n--- FGMP Sensitivity Results (Impact Score) ---")
+        for name, score in sorted(avg_sensitivity.items()):
+            print(f"  Module: {name:<50} Impact Score: {score:.4f}")
+            try:
+                layer_index = int(name.split('.')[2])
+                module_type = ".".join(name.split('.')[3:])
+                per_layer_sensitivity[layer_index] += score
+                per_module_sensitivity[module_type][layer_index] = score
+            except (ValueError, IndexError): continue
+        
+        print("\n--- Layer-wise Total Impact Score ---")
+        for layer, val in sorted(per_layer_sensitivity.items()):
+            print(f"  Layer {layer}: {val:.4f}")
+        
+        # Save results to JSON files
+        self._save_to_json(per_layer_sensitivity, f"fgmp_sensitivity_per_layer_{high_prec_bits}_{low_prec_bits}.json")
+        self._save_to_json(per_module_sensitivity, f"fgmp_sensitivity_per_module_{high_prec_bits}_{low_prec_bits}.json")
+
+        if plot:
+            sensitivity_data = {
+                "per_layer": per_layer_sensitivity,
+                "per_module": per_module_sensitivity
+            }
+            plot_fgmp_sensitivity(sensitivity_data, self.model.config._name_or_path, high_prec_bits, low_prec_bits)

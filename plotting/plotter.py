@@ -2,8 +2,23 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 import math
+import pandas as pd
 
-def plot_layer_errors(layer_errors, model_name: str, bits: int, granularity: str):
+def _get_title_suffix(model_name, use_hadamard, exclude_tokens=None):
+    """Helper to create a title suffix for plots."""
+    hadamard_str = " - Hadamard Transformed" if use_hadamard else ""
+    exclude_str = ""
+    if exclude_tokens:
+        exclude_str = f"\n(Excluding: {', '.join(map(repr, exclude_tokens))[:50]}...)"
+    return f"({model_name}{hadamard_str}){exclude_str}"
+
+def _get_filename_suffix(use_hadamard, exclude_tokens=None):
+    """Helper to create a filename suffix for plots."""
+    hadamard_suffix = "_hadamard" if use_hadamard else ""
+    exclude_suffix = "_excluded" if exclude_tokens else ""
+    return f"{hadamard_suffix}{exclude_suffix}"
+
+def plot_layer_errors(layer_errors, model_name: str, bits: int, granularity: str, use_hadamard: bool = False, exclude_tokens: list = None):
     """
     Plots the average quantization error for each layer.
 
@@ -23,19 +38,20 @@ def plot_layer_errors(layer_errors, model_name: str, bits: int, granularity: str
 
     plt.figure(figsize=(15, 7))
     plt.plot(int_keys, avg_errors, marker='o', linestyle='-')
-    plt.title(f'Layer-wise Average Activation Quantization Error\n({model_name} - {bits}-bit, {granularity})')
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    plt.title(f'Layer-wise Average Activation Quantization Error\n({model_name} - {bits}-bit, {granularity}) {title_suffix}')
     plt.xlabel('Layer Index')
     plt.ylabel('Mean Squared Error (MSE)')
     plt.xticks(int_keys)
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
     plt.tight_layout()
     
-    filename = f"layer_errors_{model_name.replace('/', '_')}_{bits}bit_{granularity}.png"
+    filename = f"layer_errors_{model_name.replace('/', '_')}_{bits}bit_{granularity}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved layer-wise error plot to {filename}")
     plt.close()
 
-def plot_module_errors(module_errors, model_name: str, bits: int, granularity: str):
+def plot_module_errors(module_errors, model_name: str, bits: int, granularity: str, use_hadamard: bool = False, exclude_tokens: list = None):
     """
     Plots the quantization error for each module type across all layers.
 
@@ -68,20 +84,21 @@ def plot_module_errors(module_errors, model_name: str, bits: int, granularity: s
             errors = [layer_data[l] for l in layers]
             plt.plot(layers, errors, marker='o', linestyle='--', label=module_type)
 
-    plt.title(f'Module-wise Activation Quantization Error Across Layers\n({model_name} - {bits}-bit, {granularity})')
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    plt.title(f'Module-wise Activation Quantization Error Across Layers\n({model_name} - {bits}-bit, {granularity}) {title_suffix}')
     plt.xlabel('Layer Index')
     plt.ylabel('Mean Squared Error (MSE)')
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
     plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout to make room for legend
 
-    filename = f"module_errors_{model_name.replace('/', '_')}_{bits}bit_{granularity}.png"
+    filename = f"module_errors_{model_name.replace('/', '_')}_{bits}bit_{granularity}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved module-wise error plot to {filename}")
     plt.close()
 
 
-def plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granularity):
+def plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granularity, use_hadamard: bool = False, exclude_tokens: list = None):
     """
     Plots the top K tokens with the highest average quantization error for multiple modules in subplots.
 
@@ -101,7 +118,8 @@ def plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granula
     nrows = math.ceil(num_modules / ncols)
     
     fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
-    fig.suptitle(f'Top Tokens with Highest Avg. Activation Quantization Error ({model_name} - {bits}-bit, {granularity})', fontsize=20, y=0.96)
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    fig.suptitle(f'Top Tokens with Highest Avg. Activation Quantization Error ({model_name} - {bits}-bit, {granularity}) {title_suffix}', fontsize=20, y=0.96)
 
     # Define a color cycle for the subplots
     colors = plt.get_cmap('tab10').colors 
@@ -150,13 +168,13 @@ def plot_top_token_errors_by_module(module_top_tokens, model_name, bits, granula
         fig.delaxes(axes.flatten()[i])
 
     plt.tight_layout(rect=[0, 0, 1, 0.94]) # Adjust layout for suptitle
-    
-    filename = f"top_token_errors_by_module_{model_name.replace('/', '_')}_{bits}bit_{granularity}.png"
+
+    filename = f"top_token_errors_by_module_{model_name.replace('/', '_')}_{bits}bit_{granularity}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved top token errors by module plot to {filename}")
     plt.close()
 
-def plot_layer_magnitudes(layer_mags, model_name):
+def plot_layer_magnitudes(layer_mags, model_name, use_hadamard: bool = False, exclude_tokens: list = None):
     """Plots the average max activation magnitude for each layer."""
     if not layer_mags:
         print("No layer magnitude data to plot.")
@@ -167,18 +185,19 @@ def plot_layer_magnitudes(layer_mags, model_name):
 
     plt.figure(figsize=(15, 7))
     plt.plot(layers, magnitudes, marker='o', linestyle='-')
-    plt.title(f'Layer-wise Average Max Activation Magnitude ({model_name})')
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    plt.title(f'Layer-wise Average Max Activation Magnitude {title_suffix}')
     plt.xlabel('Layer Index')
     plt.ylabel('Average Max Magnitude')
     plt.xticks(layers)
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    
-    filename = f"layer_magnitudes_{model_name.replace('/', '_')}.png"
+
+    filename = f"layer_magnitudes_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved layer magnitude plot to {filename}")
     plt.close()
 
-def plot_module_magnitudes(module_mags, model_name):
+def plot_module_magnitudes(module_mags, model_name, use_hadamard: bool = False, exclude_tokens: list = None):
     """Plots the average max activation magnitude for each module type."""
     if not module_mags:
         print("No module magnitude data to plot.")
@@ -190,19 +209,20 @@ def plot_module_magnitudes(module_mags, model_name):
 
     plt.figure(figsize=(12, 8))
     plt.bar(sorted_modules, magnitudes, color=colors)
-    plt.title(f'Module-wise Average Max Activation Magnitude ({model_name})')
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    plt.title(f'Module-wise Average Max Activation Magnitude {title_suffix}')
     plt.xlabel('Module Type')
     plt.ylabel('Average Max Magnitude (across all layers)')
     plt.xticks(rotation=45, ha='right')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
 
-    filename = f"module_magnitudes_{model_name.replace('/', '_')}.png"
+    filename = f"module_magnitudes_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved module magnitude plot to {filename}")
     plt.close()
 
-def plot_top_token_magnitudes_by_module(module_top_tokens, model_name):
+def plot_top_token_magnitudes_by_module(module_top_tokens, model_name, use_hadamard: bool = False, exclude_tokens: list = None):
     """Plots the top K tokens with the highest average max magnitude for multiple modules."""
     if not module_top_tokens:
         print("No token magnitude data to plot.")
@@ -214,8 +234,9 @@ def plot_top_token_magnitudes_by_module(module_top_tokens, model_name):
     
     fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
     #fig.suptitle(f'Top Tokens by Average Max Activation Magnitude ({model_name})', fontsize=20, y=0.96)
-    fig.suptitle(f'Top Tokens by Max Activation Magnitude ({model_name})', fontsize=20, y=0.96)
-    
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    fig.suptitle(f'Top Tokens by Max Activation Magnitude {title_suffix}', fontsize=20, y=0.96)
+
     colors = plt.get_cmap('plasma')(np.linspace(0, 1, num_modules))
     sorted_module_names = sorted(module_top_tokens.keys())
 
@@ -238,13 +259,13 @@ def plot_top_token_magnitudes_by_module(module_top_tokens, model_name):
     for i in range(num_modules, nrows * ncols):
         fig.delaxes(axes.flatten()[i])
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    
-    filename = f"top_token_magnitudes_by_module_{model_name.replace('/', '_')}.png"
+
+    filename = f"top_token_magnitudes_by_module_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved top token magnitude plot to {filename}")
     plt.close()
 
-def plot_module_magnitudes_per_layer(module_mags_data, model_name):
+def plot_module_magnitudes_per_layer(module_mags_data, model_name, use_hadamard: bool = False, exclude_tokens: list = None):
     """
     Plots the average max activation magnitude for each module type across all layers.
     Groups redundant modules (q_proj, k_proj, v_proj and gate_proj, up_proj) for clarity.
@@ -279,7 +300,8 @@ def plot_module_magnitudes_per_layer(module_mags_data, model_name):
             magnitudes = [layer_data[l] for l in layers]
             plt.plot(layers, magnitudes, marker='o', linestyle='--', label=module_type, color=colors[i % len(colors)])
 
-    plt.title(f'Module-wise Average Max Activation Magnitude Across Layers ({model_name})', fontsize=16)
+    title_suffix = _get_title_suffix(model_name, use_hadamard, exclude_tokens)
+    plt.title(f'Module-wise Average Max Activation Magnitude Across Layers {title_suffix}', fontsize=16)
     plt.xlabel('Layer Index')
     plt.ylabel('Average Max Magnitude')
     plt.xticks(sorted(layers))
@@ -287,12 +309,12 @@ def plot_module_magnitudes_per_layer(module_mags_data, model_name):
     plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.tight_layout(rect=[0, 0, 0.85, 1])
 
-    filename = f"module_magnitudes_per_layer_{model_name.replace('/', '_')}.png"
+    filename = f"module_magnitudes_per_layer_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard, exclude_tokens)}.png"
     plt.savefig(filename)
     print(f"Saved per-layer module magnitude plot to {filename}")
     plt.close()
 
-def plot_activation_kurtosis(kurtosis_data, model_name):
+def plot_activation_kurtosis(kurtosis_data, model_name, use_hadamard: bool = False):
     """
     Plots the average activation kurtosis for each layer and module type.
 
@@ -304,7 +326,8 @@ def plot_activation_kurtosis(kurtosis_data, model_name):
     per_module_kurtosis = kurtosis_data.get('per_module', {})
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14))
-    fig.suptitle(f'Activation Kurtosis Analysis ({model_name})', fontsize=20, y=0.97)
+    title_suffix = _get_title_suffix(model_name, use_hadamard)
+    fig.suptitle(f'Activation Kurtosis Analysis {title_suffix}', fontsize=20, y=0.97)
 
     # Plot 1: Per-Layer Kurtosis
     if per_layer_kurtosis:
@@ -330,13 +353,13 @@ def plot_activation_kurtosis(kurtosis_data, model_name):
         ax2.grid(axis='y', linestyle='--', alpha=0.7)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    
-    filename = f"activation_kurtosis_{model_name.replace('/', '_')}.png"
+
+    filename = f"activation_kurtosis_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard)}.png"
     plt.savefig(filename)
     print(f"Saved activation kurtosis plot to {filename}")
     plt.close()
 
-def plot_top_token_kurtosis(data, title_prefix, filename_prefix, model_name):
+def plot_top_token_kurtosis(data, title_prefix, filename_prefix, model_name, use_hadamard: bool = False):
     """
     A generic plotter for top token kurtosis by module or by layer.
     """
@@ -349,8 +372,9 @@ def plot_top_token_kurtosis(data, title_prefix, filename_prefix, model_name):
     nrows = math.ceil(num_items / ncols)
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
-    fig.suptitle(f'Top Tokens with Highest Activation Kurtosis ({model_name})', fontsize=20, y=0.96)
-    
+    title_suffix = _get_title_suffix(model_name, use_hadamard)
+    fig.suptitle(f'Top Tokens with Highest Activation Kurtosis {title_suffix}', fontsize=20, y=0.96)
+
     colors = plt.get_cmap('cividis').colors
     sorted_item_names = sorted(data.keys())
 
@@ -373,8 +397,379 @@ def plot_top_token_kurtosis(data, title_prefix, filename_prefix, model_name):
         fig.delaxes(axes.flatten()[i])
 
     plt.tight_layout(rect=[0, 0, 1, 0.94])
-    
-    filename = f"{filename_prefix}_{model_name.replace('/', '_')}.png"
+
+    filename = f"{filename_prefix}_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard)}.png"
     plt.savefig(filename)
     print(f"Saved {title_prefix} kurtosis plot to {filename}")
+    plt.close()
+
+def plot_down_proj_spikes(data, model_name, use_hadamard: bool = False):
+    """
+    Plots the top 5 token activation magnitudes for each down_proj layer.
+    """
+    if not data:
+        print("No down_proj spike data to plot.")
+        return
+
+    num_layers = len(data)
+    ncols = 4
+    nrows = math.ceil(num_layers / ncols)
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=(8 * ncols, 4 * nrows), squeeze=False)
+    title_suffix = _get_title_suffix(model_name, use_hadamard)
+    fig.suptitle(f'Top 5 Token Activation Magnitudes in down_proj Layers {title_suffix}', fontsize=20, y=0.97)
+
+    sorted_layers = sorted(data.keys())
+
+    for i, layer_idx in enumerate(sorted_layers):
+        ax = axes[i // ncols, i % ncols]
+        top_tokens = data[layer_idx]
+        top_tokens.reverse()
+
+        mags = [item[0] for item in top_tokens]
+        token_texts = [repr(item[1]) for item in top_tokens]
+
+        ax.barh(token_texts, mags, color='firebrick', alpha=0.8)
+        ax.set_title(f'Layer {layer_idx}')
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(axis='x', linestyle='--', alpha=0.6)
+
+    for i in range(num_layers, nrows * ncols):
+        fig.delaxes(axes.flatten()[i])
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    filename = f"down_proj_spikes_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard)}.png"
+    plt.savefig(filename)
+    print(f"Saved down_proj activation spike plot to {filename}")
+    plt.close()
+
+def plot_prompt_spikes(data, token_labels, model_name, layers_to_plot=None, use_hadamard: bool = False):
+    """
+    Plots the activation magnitude for each token in a prompt across different layers.
+    """
+    if not data:
+        print("No prompt spike data to plot.")
+        return
+
+    num_modules = len(data)
+    ncols = 2
+    nrows = math.ceil(num_modules / ncols)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12 * ncols, 7 * nrows), squeeze=False)
+    title_suffix = _get_title_suffix(model_name, use_hadamard)
+    fig.suptitle(f'Per-Token Activation Magnitude for Prompt {title_suffix}', fontsize=20, y=0.96)
+
+    colors = plt.get_cmap('viridis')
+    sorted_module_names = sorted(data.keys())
+
+    for i, module_name in enumerate(sorted_module_names):
+        ax = axes[i // ncols, i % ncols]
+        layer_data = data[module_name]
+        
+        # Filter layers if a list is provided
+        if layers_to_plot:
+            layer_data_to_plot = {l: d for l, d in layer_data.items() if l in layers_to_plot}
+        else:
+            layer_data_to_plot = layer_data
+            
+        num_layers_to_plot = len(layer_data_to_plot)
+        if num_layers_to_plot == 0:
+            ax.text(0.5, 0.5, "No specified layers to plot", ha='center', va='center')
+            ax.set_title(f'Module Type: {module_name}')
+            continue
+            
+        layer_colors = colors(np.linspace(0, 1, num_layers_to_plot))
+
+        for j, (layer_idx, mags) in enumerate(sorted(layer_data_to_plot.items())):
+            ax.plot(mags, marker='.', linestyle='-', label=f'Layer {layer_idx}', color=layer_colors[j], alpha=0.7)
+
+        ax.set_title(f'Module Type: {module_name}')
+        ax.set_xlabel('Token Position in Prompt')
+        ax.set_ylabel('Max Activation Magnitude')
+        ax.set_xticks(range(len(token_labels)))
+        ax.set_xticklabels([repr(l) for l in token_labels], rotation=45, ha='right')
+        ax.grid(True, which='both', linestyle='--', alpha=0.6)
+        if num_layers_to_plot <= 10: # Only show legend if not too cluttered
+            ax.legend()
+
+    for i in range(num_modules, nrows * ncols):
+        fig.delaxes(axes.flatten()[i])
+
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    filename = f"prompt_spikes_{model_name.replace('/', '_')}{_get_filename_suffix(use_hadamard)}.png"
+    plt.savefig(filename)
+    print(f"Saved prompt spike plot to {filename}")
+    plt.close()
+
+def plot_token_occurrence_magnitudes(data, target_token_str, model_name, use_hadamard: bool = False):
+    """
+    Plots the average max magnitude of a target token vs. its occurrence number.
+    """
+    if not data:
+        print(f"No occurrence data to plot for token: {repr(target_token_str)}")
+        return
+
+    plt.figure(figsize=(18, 9))
+    colors = plt.get_cmap('tab10').colors
+
+    for i, (module_type, occurrences_data) in enumerate(sorted(data.items())):
+        if occurrences_data:
+            occurrences = sorted(occurrences_data.keys())
+            avg_mags = [occurrences_data[o]['avg_mag'] for o in occurrences]
+            counts = [occurrences_data[o]['count'] for o in occurrences]
+            
+            # Create labels with counts for the legend
+            label = f"{module_type} (n={sum(counts)})"
+            plt.plot(occurrences, avg_mags, marker='o', linestyle='-', label=label, color=colors[i % len(colors)])
+
+    title_suffix = _get_title_suffix(model_name, use_hadamard)
+    plt.title(f"Activation Magnitude of Token {repr(target_token_str)} vs. Occurrence Number {title_suffix}", fontsize=16)
+    plt.xlabel("Occurrence Number in Sequence")
+    plt.ylabel("Average Max Magnitude")
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.legend()
+    plt.tight_layout()
+
+    filename = f"token_occurrence_magnitude_{model_name.replace('/', '_')}_{target_token_str.encode('unicode_escape').decode()}{_get_filename_suffix(use_hadamard)}.png"
+    plt.savefig(filename)
+    print(f"Saved token occurrence magnitude plot to {filename}")
+    plt.close()
+
+# def plot_bops_analysis(bops_data, model_name, bits):
+#     """
+#     Generates a plot for layer-wise BOPs analysis.
+
+#     Args:
+#         bops_data (dict): Dict with layer-wise total BOPs.
+#         model_name (str): Name of the model for titles.
+#         bits (int): Bit-width for weights and activations.
+#     """
+#     # --- Plot Layer-wise Bar Chart ---
+#     int_keys = sorted([k for k in bops_data.keys() if isinstance(k, int)])
+#     all_keys = int_keys + [k for k in bops_data.keys() if not isinstance(k, int)]
+    
+#     layer_labels = [str(k) for k in all_keys]
+#     bops_values = [bops_data[k] for k in all_keys]
+
+#     fig, ax = plt.subplots(figsize=(20, 9))
+#     ax.bar(layer_labels, bops_values, color='mediumseagreen')
+    
+#     ax.set_title(f'Layer-wise Bit-Operations (BOPs) Analysis ({model_name} - {bits}-bit)', fontsize=16)
+#     ax.set_xlabel('Layer Index')
+#     ax.set_ylabel('Giga-BOPs per Token')
+#     ax.tick_params(axis='x', rotation=45)
+#     ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+#     plt.tight_layout()
+    
+#     filename = f"bops_analysis_{model_name.replace('/', '_')}_{bits}bit.png"
+#     plt.savefig(filename)
+#     print(f"Saved BOPs analysis plot to {filename}")
+#     plt.close()
+
+def plot_bops_analysis(bops_data, model_name, bits):
+    """
+    Generates plots for BOPs analysis.
+
+    Args:
+        bops_data (dict): Dict with per-module BOPs for each layer.
+        model_name (str): Name of the model for titles.
+        bits (int): Bit-width for weights and activations.
+    """
+    # --- Plot 1: Layer-wise Stacked Bar Chart ---
+    df = pd.DataFrame(bops_data).T.fillna(0)
+    # Ensure layers are sorted numerically, with 'head' at the end
+    numeric_layers = sorted([l for l in df.index if isinstance(l, int)])
+    head_layer = ['head'] if 'head' in df.index else []
+    
+    df = df.reindex(numeric_layers)
+    df = df.reindex(sorted(df.columns), axis=1) # Sort columns for consistent color
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
+    fig.suptitle(f'Bit-Operations (BOPs) Analysis ({model_name} - {bits}-bit)', fontsize=20, y=0.97)
+
+    df.plot(kind='bar', stacked=True, ax=ax1, colormap='viridis')
+    ax1.set_title('Layer-wise BOPs Distribution')
+    ax1.set_xlabel('Layer Index')
+    ax1.set_ylabel('Giga-BOPs per Token')
+    ax1.tick_params(axis='x', rotation=45)
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+    ax1.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+    
+    # --- Plot 2: Module-wise BOPs Across Layers ---
+    for module in df.columns:
+        ax2.plot(df.index.astype(str), df[module], marker='o', linestyle='--', label=module)
+    
+    ax2.set_title('Module-wise BOPs Across Layers')
+    ax2.set_xlabel('Layer Index')
+    ax2.set_ylabel('Giga-BOPs per Token')
+    ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+    
+    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+    
+    filename = f"bops_analysis_{model_name.replace('/', '_')}_{bits}bit.png"
+    plt.savefig(filename)
+    print(f"Saved BOPs analysis plot to {filename}")
+    plt.close()
+
+def plot_fisher_information(fisher_data, model_name, agg: str = 'average'):
+    """
+    Generates plots for Fisher Information analysis.
+
+    Args:
+        fisher_data (dict): Dict with per-layer and per-module-per-layer data.
+        model_name (str): Name of the model for titles.
+    """
+    per_layer_fisher = fisher_data.get('per_layer', {})
+    per_module_fisher = fisher_data.get('per_module', {})
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
+    fig.suptitle(f'Activation Fisher Information ({agg}) Analysis ({model_name})', fontsize=20, y=0.97)
+
+    # --- Plot 1: Per-Layer Total Fisher Information ---
+    if per_layer_fisher:
+        layers = sorted(per_layer_fisher.keys())
+        fisher_values = [per_layer_fisher[l] for l in layers]
+        ax1.bar(layers, fisher_values, color='darkcyan')
+        ax1.set_title(f'Layer-wise Total Activation Fisher Information ({agg})')
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Fisher Information (Sum of Squared Gradients)')
+        ax1.set_xticks(layers)
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # --- Plot 2: Per-Module Fisher Information Across Layers ---
+    if per_module_fisher:
+        plot_data = defaultdict(dict)
+        if 'self_attn.q_proj' in per_module_fisher: plot_data['self_attn.qkv_proj'] = per_module_fisher['self_attn.q_proj']
+        if 'mlp.gate_proj' in per_module_fisher: plot_data['mlp.gate_up_proj'] = per_module_fisher['mlp.gate_proj']
+        for mtype, ldata in per_module_fisher.items():
+            if all(p not in mtype for p in ['q_proj', 'k_proj', 'v_proj', 'gate_proj', 'up_proj']):
+                plot_data[mtype] = ldata
+        
+        all_layers = set(); [all_layers.update(ld.keys()) for ld in plot_data.values()]
+        sorted_layers = sorted(list(all_layers))
+        colors = plt.get_cmap('tab10').colors
+        
+        for i, (mtype, ldata) in enumerate(sorted(plot_data.items())):
+            values = [ldata.get(l, np.nan) for l in sorted_layers]
+            ax2.plot(sorted_layers, values, marker='o', linestyle='--', label=mtype, color=colors[i % len(colors)])
+
+        ax2.set_title(f'Module-wise Activation Fisher Information ({agg}) Across Layers')
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('Fisher Information')
+        ax2.set_xticks(sorted_layers)
+        ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+
+    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+    filename = f"fisher_information_{agg}_{model_name.replace('/', '_')}.png"
+    plt.savefig(filename)
+    print(f"Saved Fisher Information analysis plot to {filename}")
+    plt.close()
+
+def plot_max_median_ratio(ratio_data, model_name):
+    """
+    Generates plots for Max-to-Median Ratio analysis.
+    """
+    per_layer_ratio = ratio_data.get('per_layer', {})
+    per_module_ratio = ratio_data.get('per_module', {})
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
+    fig.suptitle(f'Activation Max-to-Median Ratio Analysis ({model_name})', fontsize=20, y=0.97)
+
+    # --- Plot 1: Per-Layer Max-to-Median Ratio ---
+    if per_layer_ratio:
+        layers = sorted(per_layer_ratio.keys())
+        ratios = [per_layer_ratio[l] for l in layers]
+        ax1.bar(layers, ratios, color='purple')
+        ax1.set_title('Layer-wise Activation Max-to-Median Ratio')
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Max / Median Ratio')
+        ax1.set_xticks(layers)
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # --- Plot 2: Per-Module Max-to-Median Ratio Across Layers ---
+    if per_module_ratio:
+        plot_data = defaultdict(dict)
+        if 'self_attn.q_proj' in per_module_ratio: plot_data['self_attn.qkv_proj'] = per_module_ratio['self_attn.q_proj']
+        if 'mlp.gate_proj' in per_module_ratio: plot_data['mlp.gate_up_proj'] = per_module_ratio['mlp.gate_proj']
+        for mtype, ldata in per_module_ratio.items():
+            #if all(p not in mtype for p in ['q_proj', 'k_proj', 'v_proj', 'gate_proj', 'up_proj']):
+            plot_data[mtype] = ldata
+        
+        all_layers = set(); [all_layers.update(ld.keys()) for ld in plot_data.values()]
+        sorted_layers = sorted(list(all_layers))
+        colors = plt.get_cmap('tab10').colors
+        
+        for i, (mtype, ldata) in enumerate(sorted(plot_data.items())):
+            values = [ldata.get(l, np.nan) for l in sorted_layers]
+            ax2.plot(sorted_layers, values, marker='o', linestyle='--', label=mtype, color=colors[i % len(colors)])
+
+        ax2.set_title('Module-wise Activation Max-to-Median Ratio Across Layers')
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('Max / Median Ratio')
+        ax2.set_xticks(sorted_layers)
+        ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+
+    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+    filename = f"max_median_ratio_{model_name.replace('/', '_')}.png"
+    plt.savefig(filename)
+    print(f"Saved Max-to-Median Ratio analysis plot to {filename}")
+    plt.close()
+
+def plot_fgmp_sensitivity(sensitivity_data, model_name, high_prec_bits, low_prec_bits):
+    """
+    Generates plots for FGMP sensitivity analysis.
+    """
+    per_layer_sensitivity = sensitivity_data.get('per_layer', {})
+    per_module_sensitivity = sensitivity_data.get('per_module', {})
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
+    fig.suptitle(f'FGMP Activation Sensitivity Analysis ({model_name} - FP{high_prec_bits} vs FP{low_prec_bits})', fontsize=20, y=0.97)
+
+    # --- Plot 1: Per-Layer Total Sensitivity ---
+    if per_layer_sensitivity:
+        layers = sorted(per_layer_sensitivity.keys())
+        sensitivity_values = [per_layer_sensitivity[l] for l in layers]
+        ax1.bar(layers, sensitivity_values, color='teal')
+        ax1.set_title('Layer-wise Total Activation Sensitivity (Impact Score)')
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('Total Impact Score')
+        ax1.set_xticks(layers)
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # --- Plot 2: Per-Module Sensitivity Across Layers ---
+    if per_module_sensitivity:
+        plot_data = defaultdict(dict)
+        if 'self_attn.q_proj' in per_module_sensitivity: plot_data['self_attn.qkv_proj'] = per_module_sensitivity['self_attn.q_proj']
+        if 'mlp.gate_proj' in per_module_sensitivity: plot_data['mlp.gate_up_proj'] = per_module_sensitivity['mlp.gate_proj']
+        for mtype, ldata in per_module_sensitivity.items():
+            if all(p not in mtype for p in ['q_proj', 'k_proj', 'v_proj', 'gate_proj', 'up_proj']):
+                plot_data[mtype] = ldata
+        
+        all_layers = set(); [all_layers.update(ld.keys()) for ld in plot_data.values()]
+        sorted_layers = sorted(list(all_layers))
+        colors = plt.get_cmap('tab10').colors
+        
+        for i, (mtype, ldata) in enumerate(sorted(plot_data.items())):
+            values = [ldata.get(l, np.nan) for l in sorted_layers]
+            ax2.plot(sorted_layers, values, marker='o', linestyle='--', label=mtype, color=colors[i % len(colors)])
+
+        ax2.set_title('Module-wise Activation Sensitivity (Impact Score) Across Layers')
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('Impact Score')
+        ax2.set_xticks(sorted_layers)
+        ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+
+    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+    filename = f"fgmp_sensitivity_{model_name.replace('/', '_')}.png"
+    plt.savefig(filename)
+    print(f"Saved FGMP sensitivity analysis plot to {filename}")
     plt.close()
