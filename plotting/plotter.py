@@ -722,24 +722,25 @@ def plot_max_median_ratio(ratio_data, model_name):
     print(f"Saved Max-to-Median Ratio analysis plot to {filename}")
     plt.close()
 
-def plot_fgmp_sensitivity(sensitivity_data, model_name, high_prec_bits, low_prec_bits):
+def plot_fgmp_sensitivity(sensitivity_data, model_name, high_prec_bits, low_prec_bits, block_size=None):
     """
     Generates plots for FGMP sensitivity analysis.
     """
     per_layer_sensitivity = sensitivity_data.get('per_layer', {})
     per_module_sensitivity = sensitivity_data.get('per_module', {})
 
+    block_size_str = f", Block Size: {block_size}" if block_size is not None else ""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
-    fig.suptitle(f'FGMP Activation Sensitivity Analysis ({model_name} - FP{high_prec_bits} vs FP{low_prec_bits})', fontsize=20, y=0.97)
+    fig.suptitle(f'FGMP Activation Sensitivity Analysis ({model_name} - FP{high_prec_bits} vs FP{low_prec_bits}{block_size_str})', fontsize=20, y=0.97)
 
     # --- Plot 1: Per-Layer Total Sensitivity ---
     if per_layer_sensitivity:
         layers = sorted(per_layer_sensitivity.keys())
         sensitivity_values = [per_layer_sensitivity[l] for l in layers]
         ax1.bar(layers, sensitivity_values, color='teal')
-        ax1.set_title('Layer-wise Total Activation Sensitivity (Impact Score)')
+        ax1.set_title('Layer-wise Average Block Sensitivity (Impact Score)')
         ax1.set_xlabel('Layer Index')
-        ax1.set_ylabel('Total Impact Score')
+        ax1.set_ylabel('Average Block Impact Score')
         ax1.set_xticks(layers)
         ax1.tick_params(axis='x', rotation=45)
         ax1.grid(axis='y', linestyle='--', alpha=0.7)
@@ -761,15 +762,16 @@ def plot_fgmp_sensitivity(sensitivity_data, model_name, high_prec_bits, low_prec
             values = [ldata.get(l, np.nan) for l in sorted_layers]
             ax2.plot(sorted_layers, values, marker='o', linestyle='--', label=mtype, color=colors[i % len(colors)])
 
-        ax2.set_title('Module-wise Activation Sensitivity (Impact Score) Across Layers')
+        ax2.set_title('Module-wise Average Block Sensitivity (Impact Score) Across Layers')
         ax2.set_xlabel('Layer Index')
-        ax2.set_ylabel('Impact Score')
+        ax2.set_ylabel('Average Block Impact Score')
         ax2.set_xticks(sorted_layers)
         ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
         ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
 
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])
-    filename = f"fgmp_sensitivity_{model_name.replace('/', '_')}.png"
+    block_size_suffix = f"_bs{block_size}" if block_size is not None else ""
+    filename = f"fgmp_sensitivity_{model_name.replace('/', '_')}_{high_prec_bits}_{low_prec_bits}{block_size_suffix}.png"
     plt.savefig(filename)
     print(f"Saved FGMP sensitivity analysis plot to {filename}")
     plt.close()

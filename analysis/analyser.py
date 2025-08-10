@@ -47,7 +47,7 @@ class LLMAnalyser:
             module_names (list, optional): A list of specific module name suffixes to hook. 
                                            If None, hooks all linear layers.
         """
-        print("Registering hooks to capture activations...")
+        #print("Registering hooks to capture activations...")
         target_modules = []
         for name, module in self.model.named_modules():
             if isinstance(module, torch.nn.Linear):
@@ -58,7 +58,7 @@ class LLMAnalyser:
 
         for name, module in target_modules:
             self.hooks.append(module.register_forward_hook(self._get_hook(name)))
-        print(f"Registered {len(self.hooks)} hooks.")
+        #print(f"Registered {len(self.hooks)} hooks.")
 
     def _remove_hooks(self):
         """Removes all registered hooks and clears captured data."""
@@ -91,10 +91,22 @@ class LLMAnalyser:
         return excluded_token_ids
     
     def _save_to_json(self, data, filename):
-        """Helper to save dictionary data to a JSON file."""
+        """Helper to save dictionary data to a JSON file using a custom encoder."""
+        class CustomEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, np.generic):
+                    return obj.item()
+                if isinstance(obj, torch.Tensor):
+                    return obj.cpu().tolist()
+                if isinstance(obj, defaultdict):
+                    return dict(obj)
+                return json.JSONEncoder.default(self, obj)
+
         try:
             with open(filename, 'w') as f:
-                json.dump(data, f, indent=4)
+                json.dump(data, f, indent=4, cls=CustomEncoder)
             print(f"Saved results to {filename}")
         except Exception as e:
             print(f"Error saving data to {filename}: {e}")
@@ -697,16 +709,16 @@ class LLMAnalyser:
             plot_module_errors(module_errors, model_name, bits, granularity, self.use_hadamard_transform, exclude_tokens)
     
     @torch.no_grad()
-    def run_bops_analysis(self, bits: int, plot: bool = False):
+    def run_bops_analysis(self, bits: int, plot: bool = False, block_size: int = 128):
         """
-        Calculates the theoretical Bit-Operations (BOPs) for each layer
+        Calculates the theoretical Bit-Operations (BOPs) for each layer, module, and block
         in the model, assuming a uniform weight and activation precision.
         """
-        print(f"\nStarting BOPs analysis for {bits}-bit quantization...")
+        print(f"\nStarting BOPs analysis for {bits}-bit quantization with block size {block_size}...")
         
-        # Structure: {layer_index: total_bops_for_that_layer}
         bops_per_module = defaultdict(dict)
         bops_per_layer = defaultdict(float)
+        bops_per_block = {}
         
         for name, module in self.model.named_modules():
             if isinstance(module, torch.nn.Linear):
@@ -714,17 +726,23 @@ class LLMAnalyser:
                     layer_index = int(name.split('.')[2])
                     module_type = ".".join(name.split('.')[3:])
                 except (ValueError, IndexError):
-                    # Handle modules outside of layers, like lm_head
                     layer_index = 'head'
                     module_type = 'lm_head'
 
-                # BOPs = In * Out * w_bits * a_bits (per token)
-                # We use the same bit-width for both for simplicity
+                # Per-module BOPs
                 bops = (module.in_features * module.out_features * bits * bits) / 1e9
-                
                 bops_per_module[layer_index][module_type] = bops
                 bops_per_layer[layer_index] += bops
-        
+
+                # Per-block BOPs
+                if module.in_features % block_size != 0:
+                    print(f"Warning: Module {name} in_features ({module.in_features}) not divisible by block_size ({block_size}). Skipping per-block BOPs calculation for this module.")
+                    bops_per_block[name] = []
+                else:
+                    num_blocks = module.in_features // block_size
+                    bops_block = (block_size * module.out_features * bits * bits) / 1e9
+                    bops_per_block[name] = [bops_block] * num_blocks
+
         # --- Report Results ---
         print("\n--- BOPs Analysis Results (Giga-BOPs per token) ---")
         total_bops = sum(bops_per_layer.values())
@@ -733,11 +751,10 @@ class LLMAnalyser:
         print(f"\nTotal Model G-BOPs (Linear Layers): {total_bops:.4f}")
 
         # --- Save to JSON and Plot ---
-       
         model_name_str = self.model.config._name_or_path.replace('/', '_')
         self._save_to_json(bops_per_layer, f"bops_per_layer_{model_name_str}_{bits}bit.json")
         self._save_to_json(bops_per_module, f"bops_per_module_{model_name_str}_{bits}bit.json")
-     
+        self._save_to_json(bops_per_block, f"bops_per_block_{model_name_str}_{bits}bit_bs{block_size}.json")
 
         if plot:
             print("Generating BOPs plot...")
@@ -929,76 +946,254 @@ class LLMAnalyser:
             }
             plot_max_median_ratio(ratio_data, self.model.config._name_or_path)
     
-    def run_fgmp_sensitivity_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False, high_prec_bits: int = 8, low_prec_bits: int = 4):
+    
+    def run_fgmp_sensitivity_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False, high_prec_bits: int = 8, low_prec_bits: int = 4, block_size: int = 128):
         """
-        Calculates the FGMP sensitivity metric (Impact Score) for activations.
-        Impact Score = E[ grad^2 * (Q_low(act) - Q_high(act))^2 ]
+        Calculates the FGMP sensitivity metric (Impact Score) for each activation block.
+        This version is extremely memory-efficient by performing a separate forward/backward
+        pass for each module, ensuring only one gradient tensor is in memory at a time.
         """
-        print(f"\nStarting FGMP sensitivity analysis (FP{high_prec_bits} vs FP{low_prec_bits})...")
+        print(f"\nStarting FGMP sensitivity analysis (FP{high_prec_bits} vs FP{low_prec_bits}) with block size {block_size}...")
         self.is_fisher_analysis = True
-        self._register_hooks()
         
         calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
-        if calib_data is None: self._remove_hooks(); return
+        if calib_data is None: return
 
-        sensitivity_scores = defaultdict(list)
+        # Get a list of all linear module names first
+        all_module_names = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                all_module_names.append(name)
+        
+        # Structure: {module_name: {'sum': tensor_of_sums, 'count': total_tokens_processed}}
+        block_sensitivity_accumulator = {}
 
         for i in tqdm(range(len(calib_data)), desc="Processing samples for FGMP Sensitivity"):
-            self.model.zero_grad()
             input_ids = calib_data[i]["input_ids"].to(self.device)
-            outputs = self.model(input_ids, labels=input_ids)
-            loss = outputs.loss
-            loss.backward()
 
-            for name, activations in self.captured_activations.items():
-                act = activations[0]
-                grad = act.grad
+            # Now, loop through each module for this sample
+            for name in tqdm(all_module_names, desc=f"Sample {i+1}/{len(calib_data)} - Modules", leave=False):
+                self.model.zero_grad()
+                self._remove_hooks()
+
+                # Hook only the current module
+                self._register_hooks(module_names=[name])
+                
+                # Perform a forward pass to capture the activation and build the graph
+                outputs = self.model(input_ids, labels=input_ids)
+                loss = outputs.loss
+                
+                # Get the activation for the hooked module
+                if name not in self.captured_activations or not self.captured_activations[name]:
+                    self._remove_hooks()
+                    continue
+                act = self.captured_activations[name][0]
+                
+                # Perform backward pass. Graph is NOT retained.
+                (grad,) = torch.autograd.grad(loss, act)
+
                 if grad is not None:
-                    # Calculate Fisher Info part
-                    fisher_info = grad**2
-                    
-                    # Calculate Change in Quantization Error part
-                    act_q_high = fake_quantize_activation(act, high_prec_bits, 'per-token')
-                    act_q_low = fake_quantize_activation(act, low_prec_bits, 'per-token')
-                    delta_q_error_sq = (act_q_low - act_q_high)**2
-                    
-                    # Calculate total impact score for this module instance
-                    impact_score = torch.sum(fisher_info * delta_q_error_sq).item()
-                    sensitivity_scores[name].append(impact_score)
+                    # The rest of the calculation does not require gradients, so we wrap it in no_grad
+                    with torch.no_grad():
+                        original_features = act.shape[-1]
+                        
+                        padded_act = act
+                        padded_grad = grad
+                        if original_features % block_size != 0:
+                            padding_size = block_size - (original_features % block_size)
+                            padded_act = torch.nn.functional.pad(act, (0, padding_size))
+                            padded_grad = torch.nn.functional.pad(grad, (0, padding_size))
+                        
+                        features = padded_act.shape[-1]
+                        num_blocks = features // block_size
 
-            self.captured_activations.clear()
-            self.model.zero_grad()
-            torch.cuda.empty_cache()
+                        if name not in block_sensitivity_accumulator:
+                            block_sensitivity_accumulator[name] = {
+                                'sum': torch.zeros(num_blocks, device=self.device, dtype=torch.float32),
+                                'count': 0
+                            }
+
+                        act_q_high = fake_quantize_activation(padded_act, high_prec_bits, 'per-block', block_size=block_size)
+                        act_q_low = fake_quantize_activation(padded_act, low_prec_bits, 'per-block', block_size=block_size)
+                        
+                        delta_q_error_sq = act_q_low.sub_(act_q_high).pow_(2)
+                        
+                        fisher_info = padded_grad.pow_(2)
+                        impact_score_tensor = fisher_info.mul_(delta_q_error_sq)
+                        
+                        batch_size, seq_len, _ = impact_score_tensor.shape
+                        blocked_scores = impact_score_tensor.view(batch_size, seq_len, num_blocks, block_size)
+                        
+                        impact_scores_per_block = torch.sum(blocked_scores, dim=-1)
+
+                        sum_over_seq = torch.sum(impact_scores_per_block.squeeze(0), dim=0)
+
+                        block_sensitivity_accumulator[name]['sum'] += sum_over_seq.to(torch.float32)
+                        block_sensitivity_accumulator[name]['count'] += seq_len
+                
+                self._remove_hooks()
+                del outputs, loss, act, grad
+                torch.cuda.empty_cache()
 
         self.is_fisher_analysis = False
-        self._remove_hooks()
 
-        # --- Aggregate and Report Results ---
-        avg_sensitivity = {name: np.mean(vals) for name, vals in sensitivity_scores.items()}
-        per_layer_sensitivity = defaultdict(float)
+        # --- Finalize Averages and Report Results ---
+        final_block_scores = {}
+        for name, data in block_sensitivity_accumulator.items():
+            count = data['count']
+            if count > 0:
+                avg_scores = data['sum'] / count
+                final_block_scores[name] = avg_scores.cpu().numpy()
+
+        print("\n--- FGMP Per-Block Sensitivity Analysis Complete ---")
+        print("Detailed block-wise sensitivity scores calculated for each module.")
+        
+        model_name_str = self.model.config._name_or_path.replace('/', '_')
+        
+        # Save the detailed per-block scores to a JSON file
+        filename = f"fgmp_per_block_sensitivity_{model_name_str}_{high_prec_bits}_{low_prec_bits}_bs{block_size}.json"
+        self._save_to_json(final_block_scores, filename)
+
+        # --- Generate and Save Summary Data ---
+        avg_module_sensitivity = {name: np.mean(scores) for name, scores in final_block_scores.items()}
+        per_layer_sensitivity = defaultdict(list)
         per_module_sensitivity = defaultdict(lambda: defaultdict(float))
 
-        print("\n--- FGMP Sensitivity Results (Impact Score) ---")
-        for name, score in sorted(avg_sensitivity.items()):
-            print(f"  Module: {name:<50} Impact Score: {score:.4f}")
+        for name, score in avg_module_sensitivity.items():
             try:
                 layer_index = int(name.split('.')[2])
                 module_type = ".".join(name.split('.')[3:])
-                per_layer_sensitivity[layer_index] += score
+                per_layer_sensitivity[layer_index].append(score)
                 per_module_sensitivity[module_type][layer_index] = score
             except (ValueError, IndexError): continue
+
+        avg_per_layer_sensitivity = {layer: np.mean(vals) for layer, vals in per_layer_sensitivity.items()}
         
-        print("\n--- Layer-wise Total Impact Score ---")
-        for layer, val in sorted(per_layer_sensitivity.items()):
-            print(f"  Layer {layer}: {val:.4f}")
-        
-        # Save results to JSON files
-        self._save_to_json(per_layer_sensitivity, f"fgmp_sensitivity_per_layer_{high_prec_bits}_{low_prec_bits}.json")
-        self._save_to_json(per_module_sensitivity, f"fgmp_sensitivity_per_module_{high_prec_bits}_{low_prec_bits}.json")
+        # Save summary files
+        self._save_to_json(avg_per_layer_sensitivity, f"fgmp_sensitivity_per_layer_{model_name_str}_{high_prec_bits}_{low_prec_bits}_bs{block_size}.json")
+        self._save_to_json(per_module_sensitivity, f"fgmp_sensitivity_per_module_{model_name_str}_{high_prec_bits}_{low_prec_bits}_bs{block_size}.json")
 
         if plot:
+            print("\nGenerating summary plots...")
             sensitivity_data = {
-                "per_layer": per_layer_sensitivity,
+                "per_layer": avg_per_layer_sensitivity,
                 "per_module": per_module_sensitivity
             }
-            plot_fgmp_sensitivity(sensitivity_data, self.model.config._name_or_path, high_prec_bits, low_prec_bits)
+            plot_fgmp_sensitivity(sensitivity_data, self.model.config._name_or_path, high_prec_bits, low_prec_bits, block_size)
+
+    # def run_fgmp_sensitivity_analysis(self, calib_dataset: str, num_samples: int = 16, plot: bool = False, high_prec_bits: int = 8, low_prec_bits: int = 4, block_size: int = 128):
+    #     """
+    #     Calculates the FGMP sensitivity metric (Impact Score) for activations.
+    #     Impact Score = E[ grad^2 * (Q_low(act) - Q_high(act))^2 ]
+    #     """
+    #     print(f"\nStarting FGMP sensitivity analysis (FP{high_prec_bits} vs FP{low_prec_bits})...")
+    #     self.is_fisher_analysis = True
+    #     self._register_hooks()
+
+    #     block_sensitivity_accumulator = {}
+        
+    #     calib_data = get_calibration_data(calib_dataset, self.tokenizer, n_samples=num_samples)
+    #     if calib_data is None: self._remove_hooks(); return
+
+    #     sensitivity_scores = defaultdict(list)
+
+    #     for i in tqdm(range(len(calib_data)), desc="Processing samples for FGMP Sensitivity"):
+    #         self.model.zero_grad()
+    #         input_ids = calib_data[i]["input_ids"].to(self.device)
+    #         outputs = self.model(input_ids, labels=input_ids)
+    #         loss = outputs.loss
+    #         loss.backward()
+
+    #         for name, activations in self.captured_activations.items():
+    #             act = activations[0]
+    #             grad = act.grad
+    #             if grad is not None:
+    #                 features = act.shape[-1]
+    #                 if features % block_size != 0:
+    #                     print(f"Warning: Skipping module {name} for FGMP analysis. Feature dimension {features} is not divisible by block_size {block_size}.")
+    #                     continue
+
+    #                 # Initialize accumulator for this module if not seen before
+    #                 if name not in block_sensitivity_accumulator:
+    #                     num_blocks = features // block_size
+    #                     block_sensitivity_accumulator[name] = {
+    #                         'sum': torch.zeros(num_blocks, device=self.device, dtype=torch.float32),
+    #                         'count': 0
+    #                     }
+
+    #                 # Calculate Fisher Info part
+    #                 fisher_info = grad**2
+                    
+    #                 # Calculate Change in Quantization Error part using 'per-block' granularity
+    #                 act_q_high = fake_quantize_activation(act, high_prec_bits, 'per-block', block_size=block_size)
+    #                 act_q_low = fake_quantize_activation(act, low_prec_bits, 'per-block', block_size=block_size)
+    #                 delta_q_error_sq = (act_q_low - act_q_high)**2
+                    
+    #                 # Calculate impact score per element
+    #                 impact_score_tensor = fisher_info * delta_q_error_sq
+
+    #                 # Reshape to calculate sum per block
+    #                 batch_size, seq_len, _ = impact_score_tensor.shape
+    #                 num_blocks = features // block_size
+    #                 blocked_scores = impact_score_tensor.view(batch_size, seq_len, num_blocks, block_size)
+                    
+    #                 # Sum over the block dimension to get the total impact score for each block
+    #                 impact_scores_per_block = torch.sum(blocked_scores, dim=-1) # Shape: [batch, seq_len, num_blocks]
+                    
+    #                 # Sum the block scores over the sequence dimension for this sample
+    #                 sum_over_seq = torch.sum(impact_scores_per_block.squeeze(0), dim=0) # shape [num_blocks]
+
+    #                 # Accumulate sums and counts (number of tokens)
+    #                 block_sensitivity_accumulator[name]['sum'] += sum_over_seq.to(torch.float32)
+    #                 block_sensitivity_accumulator[name]['count'] += seq_len
+
+    #         self.captured_activations.clear()
+    #         self.model.zero_grad()
+    #         torch.cuda.empty_cache()
+
+    #     self.is_fisher_analysis = False
+    #     self._remove_hooks()
+
+    #     # --- Finalize Averages and Report Results ---
+    #     # This will have the structure: {module_name: [avg_score_block_0, avg_score_block_1, ...]}
+    #     final_block_scores = {}
+    #     for name, data in block_sensitivity_accumulator.items():
+    #         count = data['count']
+    #         if count > 0:
+    #             # Average score per block over all tokens and samples
+    #             avg_scores = data['sum'] / count
+    #             final_block_scores[name] = avg_scores.cpu().numpy()
+
+    #     print("\n--- FGMP Per-Block Sensitivity Analysis Complete ---")
+    #     print("Detailed block-wise sensitivity scores calculated for each module.")
+        
+    #     # Save the detailed per-block scores to a JSON file
+    #     model_name_str = self.model.config._name_or_path.replace('/', '_')
+    #     filename = f"fgmp_per_block_sensitivity_{model_name_str}_{high_prec_bits}_{low_prec_bits}_bs{block_size}.json"
+    #     self._save_to_json(final_block_scores, filename)
+
+    #     if plot:
+    #         print("\nGenerating summary plots...")
+    #         # For plotting, we compute summary statistics from the detailed scores
+            
+    #         # Average sensitivity for each module instance (average of its block scores)
+    #         avg_module_sensitivity = {name: np.mean(scores) for name, scores in final_block_scores.items()}
+
+    #         per_layer_sensitivity = defaultdict(list)
+    #         per_module_sensitivity = defaultdict(lambda: defaultdict(float))
+
+    #         for name, score in avg_module_sensitivity.items():
+    #             try:
+    #                 layer_index = int(name.split('.')[2])
+    #                 module_type = ".".join(name.split('.')[3:])
+    #                 per_layer_sensitivity[layer_index].append(score)
+    #                 per_module_sensitivity[module_type][layer_index] = score
+    #             except (ValueError, IndexError): continue
+
+    #         avg_per_layer_sensitivity = {layer: np.mean(vals) for layer, vals in per_layer_sensitivity.items()}
+
+    #         sensitivity_data = {
+    #             "per_layer": avg_per_layer_sensitivity,
+    #             "per_module": per_module_sensitivity
+    #         }
+    #         plot_fgmp_sensitivity(sensitivity_data, self.model.config._name_or_path, high_prec_bits, low_prec_bits, block_size)

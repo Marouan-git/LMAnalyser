@@ -133,9 +133,14 @@ def main():
         default=None,
         help="A list of token strings to exclude from magnitude analysis (e.g., --exclude_tokens '.' ',' '\n')."
     )
-
-    analysis_group.add_argument("--high_prec_bits", type=int, default=8, help="High precision bit-width for FGMP analysis.")
-    analysis_group.add_argument("--low_prec_bits", type=int, default=4, help="Low precision bit-width for FGMP analysis.")
+    analysis_group.add_argument(
+        "--block_size",
+        type=int,
+        default=128,
+        help="Block size for block-wise analysis (e.g., FGMP)."
+    )
+    analysis_group.add_argument("--high_prec_bits", type=int, default=16, help="High precision bit-width for FGMP analysis.")
+    analysis_group.add_argument("--low_prec_bits", type=int, default=8, help="Low precision bit-width for FGMP analysis.")
 
     args = parser.parse_args()
     
@@ -233,7 +238,8 @@ def main():
             num_samples=args.calib_samples,
             plot=args.plot_results,
             high_prec_bits=args.high_prec_bits,
-            low_prec_bits=args.low_prec_bits
+            low_prec_bits=args.low_prec_bits,
+            block_size=args.block_size
         )
 
     print("\nAnalysis complete.")
