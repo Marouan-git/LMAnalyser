@@ -11,7 +11,7 @@ This tool is designed to analyze the internal states of Large Language Models (L
 ### Installation
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/Marouan-git/LMAnalyser.git
+    git clone [https://github.com/Marouan-git/LMAnalyser.git](https://github.com/Marouan-git/LMAnalyser.git)
     cd LMAnalyser
     ```
 
@@ -131,9 +131,98 @@ python main.py --eval_per_token_kurtosis --plot_results --calib_samples <num_sam
 python main.py --eval_per_token_kurtosis --plot_results --calib_samples 64
 ```
 
+---
+
+### g. Down-Projection Spike Analysis
+
+**Purpose**: Visualizes the top token activation spikes for each `down_proj` module. This can help identify which tokens are causing outlier issues in the MLP layers.
+
+**Command**:
+```bash
+python main.py --eval_down_proj_spikes --plot_results
+```
+
+---
+
+### h. Token Occurrence Analysis
+
+**Purpose**: Analyzes the activation magnitude of a specific token versus its occurrence number in a sequence. This can reveal if the model's handling of a token changes depending on its position.
+
+**Command**:
+```bash
+python main.py --eval_token_occurrence --target_token <token> --plot_results
+```
+*Example:*
+```bash
+python main.py --eval_token_occurrence --target_token "\n" --plot_results
+```
+
+---
+
+### i. Prompt Analysis
+
+**Purpose**: Analyzes and plots activation magnitudes for a given text prompt. This allows for a detailed inspection of how the model processes a specific input.
+
+**Command**:
+```bash
+python main.py --analyze_prompt "<your prompt>" --plot_results
+```
+*Example:*
+```bash
+python main.py --analyze_prompt "The quick brown fox jumps over the lazy dog." --plot_results
+```
+
+---
+
+### j. BOPs Calculation
+
+**Purpose**: Calculates and plots the theoretical Bit-Operations (BOPs) for the model. This is useful for understanding the computational cost of the model and the potential savings from quantization.
+
+**Command**:
+```bash
+python main.py --eval_bops --quant_bits <bits> --plot_results
+```
+*Example:*
+```bash
+python main.py --eval_bops --quant_bits 4 --plot_results
+```
+
+---
+
+### k. Fisher Information Analysis
+
+**Purpose**: Calculates and plots the Fisher Information for activations. This is a measure of how sensitive the model's output is to changes in the activations, providing another perspective on identifying critical parts of the model.
+
+**Command**:
+```bash
+python main.py --eval_fisher_info --plot_results
+```
+
+---
+
+### l. Max-to-Median Ratio Analysis
+
+**Purpose**: Calculates and plots the max-to-median ratio of activation scales (from QFEP paper: https://arxiv.org/abs/2405.14428). This is a direct measure of outlier presence and can be a strong indicator of quantization difficulty.
+
+**Command**:
+```bash
+python main.py --eval_max_median_ratio --plot_results
+```
+
+---
+
+### m. FGMP Sensitivity Analysis
+
+**Purpose**: Calculates the FGMP (Fine-Grained  Mixed Precision) sensitivity metric for activations (from FGMP paper: https://arxiv.org/abs/2504.14152). This metric helps in determining the optimal precision for different parts of the model in a mixed-precision quantization setup.
+
+**Command**:
+```bash
+python main.py --eval_fgmp_sensitivity --plot_results
+```
+
 ## 3. General Options
 
 -   `--model_path <id>`: Specify which model to analyze (e.g., `meta-llama/Llama-3-8B-hf`).
--   `--calib_dataset <name>`: Choose the calibration dataset (`c4` or `wikitext2`). Default is `c4`.
--   `--calib_samples <num>`: Set the number of samples to use for calibration-based analyses. Default is 32.
+-   `--calib_dataset <name>`: Choose the calibration dataset (`c4` or `wikitext2`). Default is `wikitext2`.
+-   `--calib_samples <num>`: Set the number of samples to use for calibration-based analyses. Default is 128.
 -   `--plot_results`: Add this flag to any analysis to generate and save corresponding plots as `.png` files.
