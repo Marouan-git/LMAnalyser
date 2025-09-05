@@ -13,7 +13,7 @@ def main():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="meta-llama/Llama-2-7b-hf",
+        default= "meta-llama/Llama-2-7b-hf", #"meta-llama/Meta-Llama-3-8B", #"meta-llama/Llama-3.2-3B", #"meta-llama/Llama-2-7b-hf"
         help="Path to the Hugging Face model or model identifier."
     )
     # --- Functionality Arguments ---
@@ -84,6 +84,20 @@ def main():
         help="Calculates the FGMP sensitivity metric for activations."
     )
     func_group.add_argument(
+        "--eval_fgmp_per_block",
+        action="store_true",
+        help="Calculates the FGMP sensitivity metric for activations, per block."
+    )
+    func_group.add_argument(
+        "--eval_error_propagation",
+        action="store_true",
+        help="If set, performs layer-by-layer error propagation analysis."
+    )
+    func_group.add_argument(
+        "--eval_full_error_propagation", 
+        action="store_true", 
+        help="If set, performs full error propagation analysis (more computationally intensive).")
+    func_group.add_argument(
         "--plot_results",
         action="store_true",
         help="If set, generates and saves plots for the analysis results."
@@ -136,7 +150,7 @@ def main():
     analysis_group.add_argument(
         "--block_size",
         type=int,
-        default=128,
+        default=32,
         help="Block size for block-wise analysis (e.g., FGMP)."
     )
     analysis_group.add_argument("--high_prec_bits", type=int, default=16, help="High precision bit-width for FGMP analysis.")
@@ -215,7 +229,8 @@ def main():
     if args.eval_bops:
         analyzer.run_bops_analysis(
             bits=args.quant_bits,
-            plot=args.plot_results
+            plot=args.plot_results,
+            block_size=args.block_size
         )
     
     if args.eval_fisher_info:
@@ -239,9 +254,36 @@ def main():
             plot=args.plot_results,
             high_prec_bits=args.high_prec_bits,
             low_prec_bits=args.low_prec_bits,
+            #block_size=args.block_size
+        )
+    
+    if args.eval_fgmp_per_block:
+        analyzer.run_fgmp_per_block_analysis(
+            calib_dataset=args.calib_dataset,
+            num_samples=args.calib_samples,
+            plot=args.plot_results,
+            high_prec_bits=args.high_prec_bits,
+            low_prec_bits=args.low_prec_bits,
             block_size=args.block_size
         )
-
+    
+    if args.eval_error_propagation:
+        analyzer.run_error_propagation_analysis(
+            calib_dataset=args.calib_dataset,
+            bits=args.quant_bits,
+            granularity=args.quant_granularity,
+            num_samples=args.calib_samples,
+            plot=args.plot_results
+        )
+        
+    if args.eval_full_error_propagation:
+        analyzer.run_full_error_propagation_analysis(
+            calib_dataset=args.calib_dataset,
+            bits=args.quant_bits,
+            granularity=args.quant_granularity,
+            num_samples=args.calib_samples,
+            plot=args.plot_results
+        )
     print("\nAnalysis complete.")
 
 if __name__ == "__main__":

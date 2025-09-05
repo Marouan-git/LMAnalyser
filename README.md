@@ -1,6 +1,10 @@
 # LMAnalyser
 
-This tool is designed to analyze the internal states of Large Language Models (LLMs), particularly Llama-like architectures, to better understand their behavior and identify opportunities for optimization, such as quantization. It provides several analysis functionalities that can be run from the command line.
+This tool is designed to analyze the internal states of Large Language Models (LLMs), particularly Llama-like architectures, to better understand their behavior and identify opportunities for optimization, such as quantization. It provides several analysis functionalities that can be run from the command line.  
+It also provides methods to compute several metrics that can be used for mixed-precision quantization optimization (cf [SpinQuant fork](https://github.com/Marouan-git/SpinQuant/)), notably:
+- Max-median ratio ([QFeP paper](https://arxiv.org/abs/2405.14428))
+- Fisher information
+- FGMP metric ([FGMP paper](https://arxiv.org/abs/2504.14152))
 
 ## 1. Setup
 
@@ -11,7 +15,7 @@ This tool is designed to analyze the internal states of Large Language Models (L
 ### Installation
 1.  Clone the repository:
     ```bash
-    git clone [https://github.com/Marouan-git/LMAnalyser.git](https://github.com/Marouan-git/LMAnalyser.git)
+    git clone https://github.com/Marouan-git/LMAnalyser.git
     cd LMAnalyser
     ```
 
@@ -202,7 +206,7 @@ python main.py --eval_fisher_info --plot_results
 
 ### l. Max-to-Median Ratio Analysis
 
-**Purpose**: Calculates and plots the max-to-median ratio of activation scales (from QFEP paper: https://arxiv.org/abs/2405.14428). This is a direct measure of outlier presence and can be a strong indicator of quantization difficulty.
+**Purpose**: Calculates and plots the max-to-median ratio of activation scales (from [QFEP paper](https://arxiv.org/abs/2405.14428)). This is a direct measure of outlier presence and can be a strong indicator of quantization difficulty.
 
 **Command**:
 ```bash
@@ -213,11 +217,27 @@ python main.py --eval_max_median_ratio --plot_results
 
 ### m. FGMP Sensitivity Analysis
 
-**Purpose**: Calculates the FGMP (Fine-Grained  Mixed Precision) sensitivity metric for activations (from FGMP paper: https://arxiv.org/abs/2504.14152). This metric helps in determining the optimal precision for different parts of the model in a mixed-precision quantization setup.
+**Purpose**: Calculates the FGMP (Fine-Grained  Mixed Precision) sensitivity metric for activations (from [FGMP paper](https://arxiv.org/abs/2504.14152)). This metric helps in determining the optimal precision for different parts of the model in a mixed-precision quantization setup.  
+It can be computed module-wise and block-wise.
 
-**Command**:
+**Module-wise Command**:  
+
+To measure the sensitivity corresponding to a 16 to 8 bits upgrade.
 ```bash
-python main.py --eval_fgmp_sensitivity --plot_results
+python main.py --eval_fgmp_sensitivity --high_prec_bits 16 --low_prec_bits 8 --plot_results
+```
+
+To measure the sensitivity corresponding to a 8 to 4 bits upgrade.
+```bash
+python main.py --eval_fgmp_sensitivity --high_prec_bits 8 --low_prec_bits 4 --plot_results
+```
+
+**Block-wise Command**:
+```bash
+python main.py --eval_fgmp_per_block --high_prec_bits 16 --low_prec_bits 8  --block_size 32
+```
+```bash
+python main.py --eval_fgmp_per_block --high_prec_bits 8 --low_prec_bits 4  --block_size 32
 ```
 
 ## 3. General Options

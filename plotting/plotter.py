@@ -536,37 +536,6 @@ def plot_token_occurrence_magnitudes(data, target_token_str, model_name, use_had
     print(f"Saved token occurrence magnitude plot to {filename}")
     plt.close()
 
-# def plot_bops_analysis(bops_data, model_name, bits):
-#     """
-#     Generates a plot for layer-wise BOPs analysis.
-
-#     Args:
-#         bops_data (dict): Dict with layer-wise total BOPs.
-#         model_name (str): Name of the model for titles.
-#         bits (int): Bit-width for weights and activations.
-#     """
-#     # --- Plot Layer-wise Bar Chart ---
-#     int_keys = sorted([k for k in bops_data.keys() if isinstance(k, int)])
-#     all_keys = int_keys + [k for k in bops_data.keys() if not isinstance(k, int)]
-    
-#     layer_labels = [str(k) for k in all_keys]
-#     bops_values = [bops_data[k] for k in all_keys]
-
-#     fig, ax = plt.subplots(figsize=(20, 9))
-#     ax.bar(layer_labels, bops_values, color='mediumseagreen')
-    
-#     ax.set_title(f'Layer-wise Bit-Operations (BOPs) Analysis ({model_name} - {bits}-bit)', fontsize=16)
-#     ax.set_xlabel('Layer Index')
-#     ax.set_ylabel('Giga-BOPs per Token')
-#     ax.tick_params(axis='x', rotation=45)
-#     ax.grid(axis='y', linestyle='--', alpha=0.7)
-    
-#     plt.tight_layout()
-    
-#     filename = f"bops_analysis_{model_name.replace('/', '_')}_{bits}bit.png"
-#     plt.savefig(filename)
-#     print(f"Saved BOPs analysis plot to {filename}")
-#     plt.close()
 
 def plot_bops_analysis(bops_data, model_name, bits):
     """
@@ -774,4 +743,79 @@ def plot_fgmp_sensitivity(sensitivity_data, model_name, high_prec_bits, low_prec
     filename = f"fgmp_sensitivity_{model_name.replace('/', '_')}_{high_prec_bits}_{low_prec_bits}{block_size_suffix}.png"
     plt.savefig(filename)
     print(f"Saved FGMP sensitivity analysis plot to {filename}")
+    plt.close()
+
+def plot_propagated_error_variance(pev_data, model_name, low_prec_bits):
+    """
+    Generates plots for Propagated Error Variance (PEV) analysis.
+
+    Args:
+        pev_data (dict): A dict containing 'per_layer' and 'per_module' PEV results.
+        model_name (str): The name of the model for plot titles.
+        low_prec_bits (int): The low-precision bit width used in the analysis.
+    """
+    per_layer_pev = pev_data.get('per_layer', {})
+    per_module_pev = pev_data.get('per_module', {})
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 18))
+    fig.suptitle(f'Propagated Error Variance (PEV) Analysis ({model_name} - FP{low_prec_bits})', fontsize=20, y=0.97)
+
+    # --- Plot 1: Per-Layer Total Propagated Error Variance ---
+    if per_layer_pev:
+        layers = sorted(per_layer_pev.keys())
+        pev_values = [per_layer_pev[l] for l in layers]
+        
+        ax1.bar(layers, pev_values, color='mediumseagreen')
+        ax1.set_title('Layer-wise Total Propagated Error Variance (PEV Score)')
+        ax1.set_xlabel('Layer Index')
+        ax1.set_ylabel('PEV Score (Total Output Variance)')
+        ax1.set_xticks(layers)
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+        ax1.set_yscale('log') # PEV scores can have a large dynamic range, log scale is often better
+        ax1.set_ylabel('PEV Score (Log Scale)')
+
+
+    # --- Plot 2: Per-Module Propagated Error Variance Across Layers ---
+    if per_module_pev:
+        # Group similar modules for cleaner plotting
+        plot_data = defaultdict(dict)
+        if 'self_attn.q_proj' in per_module_pev:
+            plot_data['self_attn.qkv_proj'] = per_module_pev['self_attn.q_proj']
+        if 'mlp.gate_proj' in per_module_pev:
+            plot_data['mlp.gate_up_proj'] = per_module_pev['mlp.gate_proj']
+        
+        # Copy over other modules
+        for module_type, layer_data in per_module_pev.items():
+            if all(proj not in module_type for proj in ['q_proj', 'k_proj', 'v_proj', 'gate_proj', 'up_proj']):
+                plot_data[module_type] = layer_data
+
+        all_layers = set()
+        for layer_data in plot_data.values():
+            all_layers.update(layer_data.keys())
+        
+        sorted_layers = sorted(list(all_layers))
+        colors = plt.get_cmap('tab10').colors
+        
+        for i, (module_type, layer_data) in enumerate(sorted(plot_data.items())):
+            # Get values for each layer, using np.nan for missing data to create gaps in the line
+            values = [layer_data.get(layer, np.nan) for layer in sorted_layers]
+            ax2.plot(sorted_layers, values, marker='o', linestyle='--', label=module_type, color=colors[i % len(colors)])
+
+        ax2.set_title('Module-wise PEV Score Across Layers')
+        ax2.set_xlabel('Layer Index')
+        ax2.set_ylabel('PEV Score')
+        ax2.set_xticks(sorted_layers)
+        ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax2.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+        ax2.set_yscale('log') # Use log scale here as well
+        ax2.set_ylabel('PEV Score (Log Scale)')
+
+
+    # Adjust layout to make room for titles and legends
+    plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+    
+    filename = f"pev_sensitivity_{model_name.replace('/', '_')}_{low_prec_bits}.png"
+    plt.savefig(filename)
+    print(f"Saved PEV sensitivity analysis plot to {filename}")
     plt.close()
